@@ -4,8 +4,11 @@ Los subcomandos (ingest, backfill...) se registran aquí a medida que existen.
 """
 
 import argparse
+import os
 
 from lfdata import __version__
+
+DEFAULT_DATA_URI = "file://./data"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -14,8 +17,37 @@ def build_parser() -> argparse.ArgumentParser:
         description="Datos y proyecciones para fantasy de La Liga.",
     )
     parser.add_argument("--version", action="version", version=f"lfdata {__version__}")
-    parser.add_subparsers(dest="command", title="comandos")
+    subparsers = parser.add_subparsers(dest="command", title="comandos")
+
+    ingest = subparsers.add_parser("ingest", help="Descarga una fuente a raw/ y curated/")
+    ingest_sources = ingest.add_subparsers(dest="source", title="fuentes", required=True)
+
+    biwenger = ingest_sources.add_parser("biwenger", help="Plantilla de una competición")
+    biwenger.add_argument(
+        "--competition",
+        required=True,
+        choices=("la-liga", "segunda-division"),
+        help="Competición a ingerir",
+    )
+    biwenger.add_argument(
+        "--data",
+        default=os.environ.get("LFDATA_DATA", DEFAULT_DATA_URI),
+        help=f"URI base del almacenamiento (por defecto {DEFAULT_DATA_URI} o $LFDATA_DATA)",
+    )
+    biwenger.set_defaults(func=_cmd_ingest_biwenger)
+
     return parser
+
+
+def _cmd_ingest_biwenger(args: argparse.Namespace) -> int:
+    from lfdata.sources.biwenger import ingest_squad
+    from lfdata.storage import Storage
+
+    storage = Storage(args.data)
+    rows = ingest_squad(storage, args.competition)
+    for table, count in rows.items():
+        print(f"{table}: {count} filas ({args.competition}) -> {args.data}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -23,7 +55,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command is None:
         parser.print_help()
-    return 0
+        return 0
+    return args.func(args)
 
 
 if __name__ == "__main__":
