@@ -1,0 +1,334 @@
+{
+  "status": 200,
+  "data": {
+    "id": 37714,
+    "name": "Forés",
+    "slug": "alex-fores",
+    "position": 4,
+    "price": 150000,
+    "fantasyPrice": 16000000,
+    "country": "ES",
+    "number": 19,
+    "birthday": 20010412,
+    "status": "ok",
+    "priceIncrement": 0,
+    "prices": [
+      [
+        250721,
+        230000
+      ],
+      [
+        250722,
+        250000
+      ],
+      [
+        250723,
+        270000
+      ],
+      [
+        250724,
+        280000
+      ]
+    ],
+    "playedHome": 9,
+    "playedAway": 9,
+    "reports": [
+      {
+        "match": {
+          "id": 46130,
+          "date": 1755286200,
+          "status": "finished",
+          "round": {
+            "id": 4484,
+            "name": "Round 1",
+            "short": "R1"
+          },
+          "preview": null,
+          "summary": null
+        },
+        "status": {
+          "status": "ok"
+        },
+        "home": false
+      },
+      {
+        "home": false,
+        "match": {
+          "id": 46156,
+          "date": 1757764800,
+          "status": "finished",
+          "home": {
+            "id": 8,
+            "name": "Getafe",
+            "slug": "getafe",
+            "score": 2
+          },
+          "away": {
+            "id": 779,
+            "name": "Real Oviedo",
+            "slug": "real-oviedo",
+            "score": 0
+          },
+          "round": {
+            "id": 4487,
+            "name": "Round 4",
+            "short": "R4"
+          },
+          "competition": {
+            "id": 1,
+            "name": "Primera División",
+            "slug": "la-liga",
+            "sport": "football",
+            "currency": "€"
+          },
+          "preview": null,
+          "summary": {
+            "id": 698201,
+            "source": "as",
+            "title": "Milla reparte goles, gozo y felicidad",
+            "url": "https://as.com/futbol/primera/milla-reparte-goles-gozo-y-felicidad-n/",
+            "date": 1757772734,
+            "photo": "",
+            "video": "",
+            "comments": 0,
+            "teams": [
+              {
+                "id": 8,
+                "name": "Getafe",
+                "slug": "getafe"
+              }
+            ],
+            "players": [
+              {
+                "id": 38116,
+                "name": "Alberto Reina",
+                "slug": "alberto-reina",
+                "altPositions": [
+                  4
+                ]
+              }
+            ]
+          }
+        },
+        "events": [
+          {
+            "type": 4,
+            "period": "secondTime",
+            "metadata": 58
+          }
+        ],
+        "points": {
+          "1": 2,
+          "2": 2,
+          "5": 2,
+          "3": 2,
+          "6": 0
+        },
+        "rawStats": {
+          "pos4": true,
+          "price": 200000,
+          "score1": 2,
+          "score2": 2,
+          "score5": 2,
+          "score3": 2,
+          "score6": 0,
+          "roundPhase": 4,
+          "away": true,
+          "homeScore": 2,
+          "awayScore": 0,
+          "lost": true,
+          "cleanSheet": false,
+          "minutesPlayed": 58,
+          "picas": 1,
+          "sofascore": 6.5
+        }
+      },
+      {
+        "home": false,
+        "match": {
+          "id": 46169,
+          "date": 1758472200,
+          "status": "finished",
+          "home": {
+            "id": 75,
+            "name": "Elche",
+            "slug": "elche",
+            "score": 1
+          },
+          "away": {
+            "id": 779,
+            "name": "Real Oviedo",
+            "slug": "real-oviedo",
+            "score": 0
+          },
+          "round": {
+            "id": 4488,
+            "name": "Round 5",
+            "short": "R5"
+          },
+          "competition": {
+            "id": 1,
+            "name": "Primera División",
+            "slug": "la-liga",
+            "sport": "football",
+            "currency": "€"
+          },
+          "preview": null,
+          "summary": null
+        },
+        "events": [
+          {
+            "type": 5,
+            "period": "secondTime",
+            "metadata": 71
+          }
+        ],
+        "points": {
+          "1": 6,
+          "2": 3,
+          "5": 5,
+          "3": 2,
+          "6": 1
+        },
+        "rawStats": {
+          "pos4": true,
+          "price": 200000,
+          "score1": 6,
+          "score2": 3,
+          "score5": 5,
+          "score3": 2,
+          "score6": 1,
+          "roundPhase": 5,
+          "away": true,
+          "homeScore": 1,
+          "awayScore": 0,
+          "lost": true,
+          "cleanSheet": true,
+          "minutesPlayed": 19,
+          "picas": 2,
+          "sofascore": 6.7
+        }
+      },
+      {
+        "home": true,
+        "match": {
+          "id": 46175,
+          "date": 1758828600,
+          "status": "finished",
+          "home": {
+            "id": 779,
+            "name": "Real Oviedo",
+            "slug": "real-oviedo",
+            "score": 1
+          },
+          "away": {
+            "id": 3,
+            "name": "Barcelona",
+            "slug": "barcelona",
+            "score": 3
+          },
+          "round": {
+            "id": 4710,
+            "name": "Round 6 (postponed)",
+            "short": "R6",
+            "part": 2
+          },
+          "competition": {
+            "id": 1,
+            "name": "Primera División",
+            "slug": "la-liga",
+            "sport": "football",
+            "currency": "€"
+          },
+          "preview": null,
+          "summary": {
+            "id": 699232,
+            "source": "as",
+            "title": "El Barça derriba el muro de Aarón",
+            "url": "https://as.com/futbol/el-barca-derriba-el-muro-de-aaron-n/",
+            "date": 1758836310,
+            "photo": "",
+            "video": "",
+            "comments": 0,
+            "teams": [
+              {
+                "id": 3,
+                "name": "Barcelona",
+                "slug": "barcelona"
+              },
+              {
+                "id": 779,
+                "name": "Real Oviedo",
+                "slug": "real-oviedo"
+              }
+            ],
+            "players": [
+              {
+                "id": 20,
+                "name": "Eric García",
+                "slug": "eric-garcia",
+                "altPositions": [
+                  3
+                ]
+              },
+              {
+                "id": 26945,
+                "name": "Lewandowski",
+                "slug": "lewandowski"
+              }
+            ]
+          }
+        },
+        "events": [
+          {
+            "type": 5,
+            "period": "secondTime",
+            "metadata": 75
+          }
+        ],
+        "points": {
+          "1": 2,
+          "2": 2,
+          "5": 2,
+          "3": 0,
+          "6": 0
+        },
+        "rawStats": {
+          "pos4": true,
+          "price": 230000,
+          "score1": 2,
+          "score2": 2,
+          "score5": 2,
+          "score3": 0,
+          "score6": 0,
+          "roundPhase": 6,
+          "home": true,
+          "homeScore": 1,
+          "awayScore": 3,
+          "lost": true,
+          "cleanSheet": false,
+          "minutesPlayed": 15,
+          "picas": 1,
+          "sofascore": 6.5
+        }
+      }
+    ],
+    "seasons": [
+      {
+        "id": "2026",
+        "name": "2025/2026 season",
+        "slug": "2025-2026",
+        "games": 18,
+        "points": {
+          "1": 40,
+          "2": 38,
+          "5": 42,
+          "3": 11,
+          "6": "-4"
+        },
+        "selected": true
+      }
+    ],
+    "canonicalURL": "https://biwenger.as.com/blog/jugadores/alex-fores/"
+  }
+}
