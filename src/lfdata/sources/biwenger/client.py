@@ -15,6 +15,9 @@ from lfdata.storage import RawStore
 API_BASE = "https://cf.biwenger.com/api/v2"
 COMPETITIONS = ("la-liga", "segunda-division")
 WAIT_SECONDS = 2.0
+# Biwenger es una API JSON que no bloquea con esperas educadas: no enruta por
+# ScrapeOps. Las fuentes que sí lo necesiten ponen esto a True (ver #28).
+PROXY_ENABLED = False
 
 
 class SourceFormatError(Exception):

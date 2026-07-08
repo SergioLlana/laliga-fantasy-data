@@ -2,7 +2,13 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from lfdata.sources.http import HttpTransport, SourceHTTPError
+from lfdata.sources.http import (
+    SCRAPEOPS_ENDPOINT,
+    HttpTransport,
+    ScrapeOpsProxy,
+    SourceHTTPError,
+    scrapeops_proxy_from_env,
+)
 
 
 @dataclass
@@ -12,12 +18,18 @@ class FakeResponse:
 
 
 @dataclass
+class FakeCall:
+    url: str
+    params: dict | None
+
+
+@dataclass
 class FakeSession:
     responses: list[FakeResponse]
-    calls: list[str] = field(default_factory=list)
+    calls: list[FakeCall] = field(default_factory=list)
 
     def get(self, url, params=None):
-        self.calls.append(url)
+        self.calls.append(FakeCall(url, dict(params) if params else None))
         return self.responses.pop(0)
 
 
@@ -77,3 +89,60 @@ def test_non_retryable_status_fails_immediately() -> None:
     transport, _ = make_transport([FakeResponse(404)], wait_seconds=0.0)
     with pytest.raises(SourceHTTPError, match="HTTP 404"):
         transport.get("https://x/a")
+
+
+# --- Modo proxy (ScrapeOps) --------------------------------------------------
+
+
+def test_without_proxy_requests_target_directly() -> None:
+    clock = FakeClock()
+    session = FakeSession([FakeResponse(200, b"body")])
+    transport = HttpTransport(session=session, sleep=clock.sleep, clock=clock, wait_seconds=0.0)
+    assert transport.get("https://sofascore/api", params={"q": "fores"}) == b"body"
+    assert session.calls == [FakeCall("https://sofascore/api", {"q": "fores"})]
+
+
+def test_with_proxy_routes_through_scrapeops_with_target_url() -> None:
+    clock = FakeClock()
+    session = FakeSession([FakeResponse(200, b"body")])
+    proxy = ScrapeOpsProxy("secret-key")
+    transport = HttpTransport(
+        session=session, proxy=proxy, sleep=clock.sleep, clock=clock, wait_seconds=0.0
+    )
+    assert transport.get("https://sofascore/api", params={"q": "fores"}) == b"body"
+    assert session.calls == [
+        FakeCall(
+            SCRAPEOPS_ENDPOINT,
+            {"api_key": "secret-key", "url": "https://sofascore/api?q=fores"},
+        )
+    ]
+
+
+def test_403_without_proxy_suggests_enabling_it() -> None:
+    transport, _ = make_transport([FakeResponse(403)], wait_seconds=0.0)
+    with pytest.raises(SourceHTTPError, match="proxy=true"):
+        transport.get("https://sofascore/api")
+
+
+def test_403_with_proxy_active_does_not_suggest_proxy() -> None:
+    clock = FakeClock()
+    session = FakeSession([FakeResponse(403)])
+    transport = HttpTransport(
+        session=session, proxy=ScrapeOpsProxy("k"), sleep=clock.sleep, clock=clock, wait_seconds=0.0
+    )
+    with pytest.raises(SourceHTTPError) as excinfo:
+        transport.get("https://sofascore/api")
+    assert "proxy=true" not in str(excinfo.value)
+
+
+def test_proxy_from_env_disabled_when_source_not_marked() -> None:
+    assert scrapeops_proxy_from_env(enabled=False, env={"LFDATA_SCRAPEOPS_KEY": "k"}) is None
+
+
+def test_proxy_from_env_disabled_without_key() -> None:
+    assert scrapeops_proxy_from_env(enabled=True, env={}) is None
+
+
+def test_proxy_from_env_enabled_with_key_and_mark() -> None:
+    proxy = scrapeops_proxy_from_env(enabled=True, env={"LFDATA_SCRAPEOPS_KEY": "k"})
+    assert isinstance(proxy, ScrapeOpsProxy)
