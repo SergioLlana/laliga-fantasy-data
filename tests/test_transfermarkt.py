@@ -1,0 +1,245 @@
+"""Tests del cliente e ingesta de Transfermarkt contra fixtures reales, sin red.
+
+Las fixtures se grabaron el 2026-07-08 del caso Álex Forés (spieler 709380) y la
+plantilla del Real Oviedo (verein 2497), el mismo caso del experimento
+docs/experiments/2026-07-07-alex-fores.md.
+"""
+
+from datetime import date
+from pathlib import Path
+
+import pytest
+
+from lfdata.cli import main
+from lfdata.sources.transfermarkt import SourceFormatError, TransfermarktClient, ingest_squads
+from lfdata.sources.transfermarkt.parse import (
+    classify_transfer,
+    market_value_rows,
+    parse_profile,
+    transfer_rows,
+)
+from lfdata.storage import Storage
+
+FIXTURES = Path(__file__).parent / "fixtures" / "transfermarkt"
+FORES = 709380
+
+
+def fixture(name: str) -> bytes:
+    return (FIXTURES / name).read_bytes()
+
+
+class RoutingTransport:
+    """Devuelve una fixture según el trozo de URL pedido; registra las llamadas."""
+
+    def __init__(self, routes: dict[str, bytes]) -> None:
+        self.routes = routes
+        self.urls: list[str] = []
+
+    def get(self, url: str, params=None) -> bytes:
+        self.urls.append(url)
+        for needle, payload in self.routes.items():
+            if needle in url:
+                return payload
+        raise AssertionError(f"URL sin fixture en el test: {url}")
+
+
+def default_routes() -> dict[str, bytes]:
+    return {
+        "startseite/wettbewerb": fixture("competition-clubs-ES1.html"),
+        "kader/verein": fixture("kader-2497.html"),
+        "profil/spieler": fixture("profile-709380.html"),
+        "marketValueDevelopment": fixture("marketvalue-709380.json"),
+        "transferHistory": fixture("transfers-709380.json"),
+    }
+
+
+@pytest.fixture
+def storage(tmp_path: Path) -> Storage:
+    return Storage(f"file://{tmp_path}")
+
+
+def raw_files(tmp_path: Path) -> list[Path]:
+    root = tmp_path / "raw"
+    return [p for p in root.rglob("*") if p.is_file()] if root.exists() else []
+
+
+# --- parseo HTML -------------------------------------------------------------
+
+
+def test_fetch_competition_clubs(storage: Storage) -> None:
+    transport = RoutingTransport(default_routes())
+    clubs = TransfermarktClient(transport, storage.raw).fetch_competition_clubs(
+        "la-liga", season=2025
+    )
+    assert len(clubs) == 20
+    ids = {club.id for club in clubs}
+    assert 2497 in ids  # Real Oviedo
+    oviedo = next(club for club in clubs if club.id == 2497)
+    assert oviedo.name == "Real Oviedo"
+
+
+def test_unknown_competition_rejected(storage: Storage) -> None:
+    client = TransfermarktClient(RoutingTransport({}), storage.raw)
+    with pytest.raises(ValueError, match="premier"):
+        client.fetch_competition_clubs("premier", season=2025)
+
+
+def test_fetch_squad(storage: Storage) -> None:
+    transport = RoutingTransport(default_routes())
+    squad = TransfermarktClient(transport, storage.raw).fetch_squad(2497, season=2025)
+    assert len(squad) == 39
+    keeper = squad[0]
+    assert keeper.name == "Aarón Escandell"
+    assert keeper.position == "Portero"
+    assert keeper.slug == "aaron-escandell"
+    assert keeper.shirt_number == 13
+
+
+def test_fetch_player_profile(storage: Storage) -> None:
+    transport = RoutingTransport(default_routes())
+    profile = TransfermarktClient(transport, storage.raw).fetch_player_profile(
+        FORES, slug="alex-fores"
+    )
+    assert profile.name == "Álex Forés"
+    assert profile.birth_date == date(2001, 4, 12)
+    assert profile.position == "Delantero centro"
+
+
+def test_profile_name_drops_shirt_number() -> None:
+    # El h1 del perfil antepone el dorsal; el nombre no debe incluirlo.
+    html = (
+        '<h1 class="data-header__headline-wrapper">'
+        '<span class="data-header__shirt-number"> #1 </span>'
+        "Thibaut <strong>Courtois</strong></h1>"
+    )
+    profile = parse_profile(html, player_id=108390)
+    assert profile.name == "Thibaut Courtois"
+
+
+# --- valores de mercado (ceapi JSON) -----------------------------------------
+
+
+def test_market_values(storage: Storage) -> None:
+    transport = RoutingTransport(default_routes())
+    graph = TransfermarktClient(transport, storage.raw).fetch_market_value(FORES)
+    rows = market_value_rows(graph, player_id=FORES)
+    assert len(rows) == 15
+    first = rows[0]
+    assert first == {
+        "player_id": FORES,
+        "date": date(2021, 10, 13),
+        "value": 50000,
+        "club_name": "Villarreal CF B",
+    }
+
+
+# --- traspasos y cesiones (ceapi JSON): el caso Forés ------------------------
+
+
+def test_transfers_reproduce_loan_chain(storage: Storage) -> None:
+    """El acceptance criterion: la cadena de cesiones del experimento Forés."""
+    transport = RoutingTransport(default_routes())
+    history = TransfermarktClient(transport, storage.raw).fetch_transfers(FORES)
+    rows = transfer_rows(history, player_id=FORES)
+    chain = {(row["date"], row["type"], row["from_club_name"], row["to_club_name"]) for row in rows}
+    assert (date(2025, 1, 20), "cesión", "Villarreal", "Levante UD") in chain
+    assert (date(2025, 6, 30), "fin de cesión", "Levante UD", "Villarreal") in chain
+    assert (date(2025, 7, 24), "cesión", "Villarreal", "Real Oviedo") in chain
+    assert (date(2026, 6, 30), "fin de cesión", "Real Oviedo", "Villarreal") in chain
+    # Un traspaso real (subida al primer equipo) queda como 'traspaso'.
+    types = {row["type"] for row in rows}
+    assert types == {"cesión", "fin de cesión", "traspaso"}
+
+
+def test_transfers_carry_club_ids(storage: Storage) -> None:
+    transport = RoutingTransport(default_routes())
+    history = TransfermarktClient(transport, storage.raw).fetch_transfers(FORES)
+    loan = next(
+        row for row in transfer_rows(history, player_id=FORES) if row["date"] == date(2025, 7, 24)
+    )
+    assert loan["from_club_id"] == 1050  # Villarreal
+    assert loan["to_club_id"] == 2497  # Real Oviedo
+
+
+def test_classify_transfer() -> None:
+    assert classify_transfer("Cesión") == "cesión"
+    assert classify_transfer("Fin de cesión") == "fin de cesión"
+    assert classify_transfer("1,50 mill. €") == "traspaso"
+    assert classify_transfer("Libre") == "traspaso"
+    assert classify_transfer("-") == "traspaso"
+
+
+# --- raw antes de interpretar ------------------------------------------------
+
+
+def test_raw_written_before_interpreting_json(storage: Storage, tmp_path: Path) -> None:
+    transport = RoutingTransport({"transferHistory": b'{"transfers": 42}'})
+    with pytest.raises(SourceFormatError, match="cambió la forma"):
+        TransfermarktClient(transport, storage.raw).fetch_transfers(FORES)
+    files = raw_files(tmp_path)
+    assert len(files) == 1
+    assert files[0].read_bytes() == b'{"transfers": 42}'
+
+
+def test_raw_written_before_interpreting_html(storage: Storage, tmp_path: Path) -> None:
+    transport = RoutingTransport({"kader/verein": b"<html><body>sin tabla</body></html>"})
+    with pytest.raises(SourceFormatError, match="plantilla"):
+        TransfermarktClient(transport, storage.raw).fetch_squad(2497, season=2025)
+    assert len(raw_files(tmp_path)) == 1
+
+
+# --- ingesta completa a tablas curadas ---------------------------------------
+
+
+def test_ingest_squads_writes_curated_tables(storage: Storage, tmp_path: Path) -> None:
+    transport = RoutingTransport(default_routes())
+    rows = ingest_squads(storage, "la-liga", season=2025, transport=transport, max_clubs=1)
+
+    # 1 club (Real Madrid, primero de la competición) con la plantilla-fixture de 39.
+    assert rows["transfermarkt_players"] == 39
+    assert rows["market_values_tm"] == 39 * 15
+    assert rows["transfers"] == 39 * 11
+
+    players = storage.curated.read_table("transfermarkt_players")
+    assert {"id", "slug", "name", "birth_date", "position", "club_id", "competition"} <= set(
+        players.columns
+    )
+    assert players["competition"].astype(str).unique().tolist() == ["la-liga"]
+
+    parquet = tmp_path / "curated" / "transfers" / "competition=la-liga" / "data.parquet"
+    assert parquet.exists()
+
+    transfers = storage.curated.read_table("transfers")
+    assert set(transfers["type"].unique()) == {"cesión", "fin de cesión", "traspaso"}
+
+
+def test_cli_ingest_end_to_end(tmp_path: Path, monkeypatch, capsys) -> None:
+    routes = default_routes()
+
+    def fake_get(self, url, params=None):
+        for needle, payload in routes.items():
+            if needle in url:
+                return payload
+        raise AssertionError(f"URL sin fixture: {url}")
+
+    monkeypatch.setattr("lfdata.sources.http.HttpTransport.get", fake_get)
+    exit_code = main(
+        [
+            "ingest",
+            "transfermarkt",
+            "--competition",
+            "la-liga",
+            "--max-clubs",
+            "1",
+            "--data",
+            f"file://{tmp_path}",
+        ]
+    )
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "transfermarkt_players: 39 filas" in out
+    values_parquet = (
+        tmp_path / "curated" / "market_values_tm" / "competition=la-liga" / "data.parquet"
+    )
+    assert values_parquet.exists()
+    assert raw_files(tmp_path)
