@@ -274,10 +274,12 @@ def _tm_date_iso(value: str) -> date | None:
 def availability_rows(response: PerformanceResponse, *, player_id: int) -> list[dict]:
     """Una fila por jugador-partido con el estado de participación y los minutos.
 
-    De cada partido tomamos disponibilidad (jugó / convocado / no convocado /
-    lesionado), minutos, titular/suplente, minuto de entrada y de salida, y los
-    marcadores de lesión/ausencia. No curamos eventing (goles, tarjetas): la
-    nota de Transfermarkt viene siempre null y esa fuente es SofaScore.
+    De cada partido tomamos disponibilidad (`participation_state`: played /
+    in squad / not in squad / injured / absent, entre otros — el conjunto es
+    abierto y se guarda tal cual, sin cerrarlo a un enum), minutos,
+    titular/suplente, minuto de entrada y de salida, y los marcadores de
+    lesión/ausencia. No curamos eventing (goles, tarjetas): la nota de
+    Transfermarkt viene siempre null y esa fuente es SofaScore.
     """
     rows: list[dict] = []
     for game in response.data.performance:
