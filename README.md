@@ -27,7 +27,7 @@ uv run lfdata ingest transfermarkt --competition la-liga
 uv run lfdata ingest transfermarkt --competition segunda-division --max-clubs 2
 ```
 
-Los datos se escriben en dos capas bajo la URI de `--data` (por defecto `file://./data`, configurable con `$LFDATA_DATA`): la respuesta cruda tal cual en `raw/` y tablas Parquet en `curated/`, legibles con pandas o DuckDB. Biwenger produce `biwenger_players` y `biwenger_teams`; Transfermarkt produce `transfermarkt_players`, `market_values_tm` y `transfers` (aún con IDs de Transfermarkt, a la espera del paso de mapping a IDs canónicos).
+Los datos se escriben en dos capas bajo la URI de `--data` (por defecto `file://./data`, configurable con `$LFDATA_DATA`): la respuesta cruda tal cual en `raw/` y tablas Parquet en `curated/`, legibles con pandas o DuckDB. Biwenger produce `biwenger_players` y `biwenger_teams`; Transfermarkt produce `transfermarkt_players`, `market_values_tm`, `transfers`, `availability_tm` (disponibilidad por partido) e `injuries_tm` (historial de lesiones), aún con IDs de Transfermarkt, a la espera del paso de mapping a IDs canónicos.
 
 ## Desarrollo
 

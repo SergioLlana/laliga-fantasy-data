@@ -13,8 +13,10 @@ import pytest
 from lfdata.cli import main
 from lfdata.sources.transfermarkt import SourceFormatError, TransfermarktClient, ingest_squads
 from lfdata.sources.transfermarkt.parse import (
+    availability_rows,
     classify_transfer,
     market_value_rows,
+    parse_injuries,
     parse_profile,
     transfer_rows,
 )
@@ -50,6 +52,8 @@ def default_routes() -> dict[str, bytes]:
         "profil/spieler": fixture("profile-709380.html"),
         "marketValueDevelopment": fixture("marketvalue-709380.json"),
         "transferHistory": fixture("transfers-709380.json"),
+        "performance-game": fixture("performance-709380.json"),
+        "verletzungen/spieler": fixture("injuries-709380.html"),
     }
 
 
@@ -169,6 +173,58 @@ def test_classify_transfer() -> None:
     assert classify_transfer("-") == "traspaso"
 
 
+# --- disponibilidad (performance-game) ---------------------------------------
+
+
+def test_availability_covers_all_participation_states(storage: Storage) -> None:
+    transport = RoutingTransport(default_routes())
+    response = TransfermarktClient(transport, storage.raw).fetch_performance(FORES)
+    rows = availability_rows(response, player_id=FORES)
+    assert {row["participation_state"] for row in rows} == {
+        "played",
+        "in squad",
+        "not in squad",
+        "injured",
+    }
+
+
+def test_availability_playing_time_and_injury_markers(storage: Storage) -> None:
+    transport = RoutingTransport(default_routes())
+    response = TransfermarktClient(transport, storage.raw).fetch_performance(FORES)
+    by_state: dict[str, dict] = {}
+    for row in availability_rows(response, player_id=FORES):
+        by_state.setdefault(row["participation_state"], row)
+
+    starter = by_state["played"]
+    assert starter["is_starting"] is True
+    assert starter["played_minutes"] == 45
+    assert starter["substituted_out_minute"] == 46
+
+    injured = by_state["injured"]
+    assert injured["played_minutes"] is None
+    assert injured["injury_id"] != 0
+
+
+# --- historial de lesiones ---------------------------------------------------
+
+
+def test_fetch_injuries(storage: Storage) -> None:
+    transport = RoutingTransport(default_routes())
+    injuries = TransfermarktClient(transport, storage.raw).fetch_injuries(FORES, slug="alex-fores")
+    assert len(injuries) == 1
+    injury = injuries[0]
+    assert injury.injury == "Fractura de tibia"
+    assert injury.from_date == date(2024, 5, 14)
+    assert injury.until_date == date(2025, 1, 1)
+    assert injury.days == 233
+    assert injury.games_missed == 26
+
+
+def test_injuries_empty_when_no_table() -> None:
+    # Un jugador sin lesiones: Transfermarkt no dibuja la tabla; lista vacía, sin error.
+    assert parse_injuries(b"<html><body>Sin lesiones</body></html>", player_id=1) == []
+
+
 # --- raw antes de interpretar ------------------------------------------------
 
 
@@ -199,6 +255,8 @@ def test_ingest_squads_writes_curated_tables(storage: Storage, tmp_path: Path) -
     assert rows["transfermarkt_players"] == 39
     assert rows["market_values_tm"] == 39 * 15
     assert rows["transfers"] == 39 * 11
+    assert rows["availability_tm"] == 39 * 5
+    assert rows["injuries_tm"] == 39 * 1
 
     players = storage.curated.read_table("transfermarkt_players")
     assert {"id", "slug", "name", "birth_date", "position", "club_id", "competition"} <= set(
@@ -211,6 +269,22 @@ def test_ingest_squads_writes_curated_tables(storage: Storage, tmp_path: Path) -
 
     transfers = storage.curated.read_table("transfers")
     assert set(transfers["type"].unique()) == {"cesión", "fin de cesión", "traspaso"}
+
+    availability = storage.curated.read_table("availability_tm")
+    assert {"player_id", "game_id", "participation_state", "played_minutes", "competition"} <= set(
+        availability.columns
+    )
+    assert set(availability["participation_state"].unique()) == {
+        "played",
+        "in squad",
+        "not in squad",
+        "injured",
+    }
+
+    injuries = storage.curated.read_table("injuries_tm")
+    assert {"player_id", "injury", "from_date", "days", "games_missed", "competition"} <= set(
+        injuries.columns
+    )
 
 
 def test_cli_ingest_end_to_end(tmp_path: Path, monkeypatch, capsys) -> None:

@@ -12,9 +12,14 @@ from pydantic import ValidationError
 
 from lfdata.sources.http import HttpTransport
 from lfdata.sources.transfermarkt import parse
-from lfdata.sources.transfermarkt.models import MarketValueGraph, TransferHistory
+from lfdata.sources.transfermarkt.models import (
+    MarketValueGraph,
+    PerformanceResponse,
+    TransferHistory,
+)
 from lfdata.sources.transfermarkt.parse import (
     Club,
+    Injury,
     PlayerProfile,
     SourceFormatError,
     SquadMember,
@@ -70,6 +75,15 @@ class TransfermarktClient:
         )
         return parse.parse_profile(payload, player_id=player_id)
 
+    def fetch_injuries(self, player_id: int, *, slug: str) -> list[Injury]:
+        """Historial de lesiones (HTML; no hay endpoint JSON de lesiones)."""
+        url = f"{BASE}/{slug}/verletzungen/spieler/{player_id}"
+        payload = self._transport.get(url)
+        self._raw_store.save(
+            "transfermarkt", "injuries", f"spieler-{player_id}", payload, extension="html"
+        )
+        return parse.parse_injuries(payload, player_id=player_id)
+
     # --- JSON ceapi ----------------------------------------------------------
 
     def fetch_market_value(self, player_id: int) -> MarketValueGraph:
@@ -85,6 +99,13 @@ class TransfermarktClient:
         payload = self._transport.get(url)
         self._raw_store.save("transfermarkt", "transfers", str(player_id), payload)
         return self._validate(TransferHistory, payload, url)
+
+    def fetch_performance(self, player_id: int) -> PerformanceResponse:
+        """Rendimiento partido a partido (JSON); insumo de disponibilidad."""
+        url = f"{BASE}/ceapi/performance-game/{player_id}"
+        payload = self._transport.get(url)
+        self._raw_store.save("transfermarkt", "performance-game", str(player_id), payload)
+        return self._validate(PerformanceResponse, payload, url)
 
     @staticmethod
     def _validate(model, payload: bytes, url: str):

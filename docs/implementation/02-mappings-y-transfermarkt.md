@@ -55,13 +55,13 @@ Lección del experimento Forés: el club del perfil es "dueño actual", no "dón
 | `availability_tm` | jugador-partido | estado de participación, minutos, titular/suplente, minuto de cambio (de `performance-game`) |
 | `injuries_tm` | lesión | temporada, diagnóstico, desde, hasta, días de baja, partidos perdidos (de la página de lesiones) |
 
-> **Estado (issue #7):** el cliente Transfermarkt y la ingesta de plantillas por
-> club, perfiles, valores y traspasos están hechos (`lfdata ingest transfermarkt`).
-> Produce `transfermarkt_players`, `market_values_tm` y `transfers`, aún con IDs de
-> Transfermarkt (columnas `id`/`player_id`/`*_club_id`); el mapping a IDs canónicos
-> (`players`, `teams`, `player_mappings`…) es el siguiente paso. `availability_tm` e
-> `injuries_tm` (endpoints `performance-game` y página de lesiones) quedan para más
-> adelante; este issue solo cubre valores y traspasos.
+> **Estado (issue #7):** el cliente Transfermarkt y la ingesta están hechos
+> (`lfdata ingest transfermarkt`). Recorre competición → clubes → plantillas y, por
+> jugador, perfil, valores, traspasos, `performance-game` y lesiones. Produce las
+> cinco tablas de arriba —`transfermarkt_players`, `market_values_tm`, `transfers`,
+> `availability_tm`, `injuries_tm`— aún con IDs de Transfermarkt (columnas
+> `id`/`player_id`/`*_club_id`). El mapping a IDs canónicos (`players`, `teams`,
+> `player_mappings`…) es el siguiente paso.
 
 ## Orden de trabajo
 

@@ -2,11 +2,12 @@
 
 Dos familias:
 
-- HTML (competición, plantilla, perfil): parseado con BeautifulSoup sobre el
-  parser de la librería estándar. Verificado el 2026-07-07 con Álex Forés
-  (docs/experiments/2026-07-07-alex-fores.md).
-- JSON `ceapi` (valores y traspasos): ya validado por pydantic en ``models``;
-  aquí solo se aplana a filas y se clasifica el tipo de movimiento.
+- HTML (competición, plantilla, perfil, lesiones): parseado con BeautifulSoup
+  sobre el parser de la librería estándar. Verificado el 2026-07-07 con Álex
+  Forés (docs/experiments/2026-07-07-alex-fores.md).
+- JSON `ceapi` (valores, traspasos, rendimiento/disponibilidad): ya validado por
+  pydantic en ``models``; aquí solo se aplana a filas, se clasifica el tipo de
+  movimiento y se extrae la disponibilidad por partido.
 
 Toda función de parseo lanza ``SourceFormatError`` si la página perdió la
 estructura de la que dependemos, para no escribir tablas curadas a medias.
@@ -21,7 +22,11 @@ from datetime import date, datetime
 
 from bs4 import BeautifulSoup
 
-from lfdata.sources.transfermarkt.models import MarketValueGraph, TransferHistory
+from lfdata.sources.transfermarkt.models import (
+    MarketValueGraph,
+    PerformanceResponse,
+    TransferHistory,
+)
 
 _SPIELER_ID = re.compile(r"/profil/spieler/(\d+)")
 _SPIELER_SLUG = re.compile(r"^/([^/]+)/profil/spieler/\d+")
@@ -53,6 +58,17 @@ class PlayerProfile:
     name: str
     birth_date: date | None
     position: str | None
+
+
+@dataclass(frozen=True)
+class Injury:
+    player_id: int
+    season: str
+    injury: str
+    from_date: date | None
+    until_date: date | None
+    days: int | None
+    games_missed: int | None
 
 
 def _soup(payload: bytes | str) -> BeautifulSoup:
@@ -250,3 +266,98 @@ def _tm_date_iso(value: str) -> date | None:
         return date.fromisoformat(value)
     except ValueError:
         return None
+
+
+# --- disponibilidad (performance-game, JSON ya validado) ---------------------
+
+
+def availability_rows(response: PerformanceResponse, *, player_id: int) -> list[dict]:
+    """Una fila por jugador-partido con el estado de participación y los minutos.
+
+    De cada partido tomamos disponibilidad (jugó / convocado / no convocado /
+    lesionado), minutos, titular/suplente, minuto de entrada y de salida, y los
+    marcadores de lesión/ausencia. No curamos eventing (goles, tarjetas): la
+    nota de Transfermarkt viene siempre null y esa fuente es SofaScore.
+    """
+    rows: list[dict] = []
+    for game in response.data.performance:
+        info = game.game_information
+        general = game.statistics.general
+        playing = game.statistics.playing_time
+        rows.append(
+            {
+                "player_id": player_id,
+                "game_id": info.game_id,
+                "date": _date_from_iso_datetime(info.date.date_utc),
+                "competition_id": info.competition_id,
+                "season_id": info.season_id,
+                "game_day": info.game_day,
+                "club_id": general.primary_club_id,
+                "opponent_club_id": _int_or_none(game.clubs_information.opponent.club_id),
+                "participation_state": general.participation_state,
+                "played_minutes": playing.played_minutes,
+                "is_starting": playing.is_starting,
+                "substituted_in_minute": (
+                    playing.substituted_in.minute if playing.substituted_in else None
+                ),
+                "substituted_out_minute": (
+                    playing.substituted_out.minute if playing.substituted_out else None
+                ),
+                "injury_id": general.injury_id,
+                "absence_id": general.absence_id,
+            }
+        )
+    return rows
+
+
+def _date_from_iso_datetime(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value).date()
+    except ValueError:
+        return None
+
+
+def _int_or_none(value: str | None) -> int | None:
+    return int(value) if value and value.isdigit() else None
+
+
+# --- historial de lesiones (HTML) --------------------------------------------
+
+
+def parse_injuries(payload: bytes | str, *, player_id: int) -> list[Injury]:
+    """Historial de lesiones de la página `verletzungen`.
+
+    Columnas: temporada, lesión (diagnóstico), desde, hasta, días de baja y
+    partidos perdidos. Un jugador sin lesiones registra una lista vacía.
+    """
+    soup = _soup(payload)
+    table = soup.find("table", class_="items")
+    if table is None or table.find("tbody") is None:
+        # Sin lesiones Transfermarkt no dibuja la tabla; no es un error de formato.
+        return []
+    injuries: list[Injury] = []
+    for row in table.find("tbody").find_all("tr", recursive=False):
+        cells = row.find_all("td")
+        if len(cells) < 6:
+            continue
+        text = [cell.get_text(strip=True) for cell in cells]
+        injuries.append(
+            Injury(
+                player_id=player_id,
+                season=text[0],
+                injury=text[1],
+                from_date=_tm_date(text[2]),
+                until_date=_tm_date(text[3]),
+                days=_leading_int(text[4]),
+                games_missed=_leading_int(text[5]),
+            )
+        )
+    return injuries
+
+
+def _leading_int(value: str) -> int | None:
+    """Primer entero de una celda ('233 dias' -> 233, '-' -> None)."""
+    match = re.search(r"\d+", value or "")
+    return int(match.group(0)) if match else None
