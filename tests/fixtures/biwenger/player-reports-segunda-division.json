@@ -1,0 +1,310 @@
+{
+  "status": 200,
+  "data": {
+    "id": 26185,
+    "name": "Alex Forés",
+    "slug": "alex-fores",
+    "position": 4,
+    "price": 1410000,
+    "fantasyPrice": 11000000,
+    "country": "ES",
+    "number": 19,
+    "birthday": 20010412,
+    "status": "ok",
+    "priceIncrement": 0,
+    "team": null,
+    "prices": [
+      [
+        260622,
+        2820000
+      ],
+      [
+        260624,
+        1140000
+      ],
+      [
+        260625,
+        1210000
+      ]
+    ],
+    "playedHome": 0,
+    "playedAway": 0,
+    "reports": [
+      {
+        "match": {
+          "id": 43339,
+          "date": 1741541400,
+          "status": "finished",
+          "round": {
+            "id": 4225,
+            "name": "Round 30",
+            "short": "R30"
+          },
+          "preview": null
+        },
+        "status": {
+          "status": "ok"
+        },
+        "home": true
+      },
+      {
+        "home": false,
+        "match": {
+          "id": 43272,
+          "date": 1737826200,
+          "status": "finished",
+          "home": {
+            "id": 421,
+            "name": "Deportivo",
+            "slug": "deportivo",
+            "score": 1
+          },
+          "away": {
+            "id": 168,
+            "name": "Levante",
+            "slug": "levante",
+            "score": 2
+          },
+          "round": {
+            "id": 4219,
+            "name": "Round 24",
+            "short": "R24"
+          },
+          "competition": {
+            "id": 2,
+            "name": "Segunda División",
+            "slug": "segunda-division",
+            "sport": "football",
+            "currency": "€"
+          },
+          "preview": null,
+          "summary": {
+            "id": 681727,
+            "source": "as",
+            "title": "El Levante escala gracias a los regalos del Deportivo",
+            "url": "https://as.com/futbol/segunda/el-levante-escala-gracias-a-los-regalos-del-deportivo-n/",
+            "date": 1737834408,
+            "photo": "",
+            "video": "",
+            "comments": 0,
+            "teams": [
+              {
+                "id": 168,
+                "name": "Levante",
+                "slug": "levante"
+              },
+              {
+                "id": 421,
+                "name": "Deportivo",
+                "slug": "deportivo"
+              }
+            ],
+            "players": []
+          }
+        },
+        "events": [
+          {
+            "type": 5,
+            "period": "secondTime",
+            "metadata": 85
+          }
+        ],
+        "points": {
+          "1": 0,
+          "2": 3,
+          "3": 2
+        },
+        "rawStats": {
+          "pos4": true,
+          "price": 4050000,
+          "score1": 0,
+          "score2": 3,
+          "score3": 2,
+          "roundPhase": 24,
+          "away": true,
+          "homeScore": 1,
+          "awayScore": 2,
+          "win": true,
+          "cleanSheet": true,
+          "minutesPlayed": 5,
+          "picas": "SC"
+        }
+      },
+      {
+        "home": true,
+        "match": {
+          "id": 43289,
+          "date": 1738611000,
+          "status": "finished",
+          "home": {
+            "id": 168,
+            "name": "Levante",
+            "slug": "levante",
+            "score": 0
+          },
+          "away": {
+            "id": 686,
+            "name": "Racing de Ferrol",
+            "slug": "racing-de-ferrol",
+            "score": 1
+          },
+          "round": {
+            "id": 4220,
+            "name": "Round 25",
+            "short": "R25"
+          },
+          "competition": {
+            "id": 2,
+            "name": "Segunda División",
+            "slug": "segunda-division",
+            "sport": "football",
+            "currency": "€"
+          },
+          "preview": null,
+          "summary": {
+            "id": 682645,
+            "source": "as",
+            "title": "Dorrio derriba el muro del Ciutat en el estreno de Menéndez",
+            "url": "https://as.com/futbol/segunda/menendez-derriba-el-muro-del-ciutat-en-su-estreno-n/",
+            "date": 1738618662,
+            "photo": "",
+            "video": "",
+            "comments": 0,
+            "teams": [
+              {
+                "id": 168,
+                "name": "Levante",
+                "slug": "levante"
+              },
+              {
+                "id": 686,
+                "name": "Racing de Ferrol",
+                "slug": "racing-de-ferrol"
+              }
+            ],
+            "players": []
+          }
+        },
+        "events": [
+          {
+            "type": 5,
+            "period": "secondTime",
+            "metadata": 62
+          }
+        ],
+        "points": {
+          "1": 2,
+          "2": 3,
+          "3": 3
+        },
+        "rawStats": {
+          "pos4": true,
+          "price": 4470000,
+          "score1": 2,
+          "score2": 3,
+          "score3": 3,
+          "roundPhase": 25,
+          "home": true,
+          "homeScore": 0,
+          "awayScore": 1,
+          "lost": true,
+          "cleanSheet": true,
+          "minutesPlayed": 28,
+          "picas": 1
+        }
+      },
+      {
+        "home": false,
+        "match": {
+          "id": 43301,
+          "date": 1739035800,
+          "status": "finished",
+          "home": {
+            "id": 422,
+            "name": "Málaga",
+            "slug": "malaga",
+            "score": 1
+          },
+          "away": {
+            "id": 168,
+            "name": "Levante",
+            "slug": "levante",
+            "score": 1
+          },
+          "round": {
+            "id": 4221,
+            "name": "Round 26",
+            "short": "R26"
+          },
+          "competition": {
+            "id": 2,
+            "name": "Segunda División",
+            "slug": "segunda-division",
+            "sport": "football",
+            "currency": "€"
+          },
+          "preview": null,
+          "summary": {
+            "id": 683054,
+            "source": "as",
+            "title": "El Málaga salva un punto que tampoco llena al Levante",
+            "url": "https://as.com/futbol/el-malaga-salva-un-punto-que-tampoco-llena-al-levante-n/",
+            "date": 1739044646,
+            "photo": "",
+            "video": "",
+            "comments": 0,
+            "teams": [
+              {
+                "id": 168,
+                "name": "Levante",
+                "slug": "levante"
+              }
+            ],
+            "players": []
+          }
+        },
+        "events": [
+          {
+            "type": 5,
+            "period": "secondTime",
+            "metadata": 79
+          }
+        ],
+        "points": {
+          "1": 2,
+          "2": 4,
+          "3": 3
+        },
+        "rawStats": {
+          "pos4": true,
+          "price": 4610000,
+          "score1": 2,
+          "score2": 4,
+          "score3": 3,
+          "roundPhase": 26,
+          "away": true,
+          "homeScore": 1,
+          "awayScore": 1,
+          "tie": true,
+          "cleanSheet": true,
+          "minutesPlayed": 11,
+          "picas": 1
+        }
+      }
+    ],
+    "seasons": [
+      {
+        "id": "2025",
+        "name": "2024/2025 season",
+        "slug": "2024-2025",
+        "games": 18,
+        "points": {
+          "1": 73,
+          "2": 80,
+          "3": 80
+        },
+        "selected": true
+      }
+    ]
+  }
+}

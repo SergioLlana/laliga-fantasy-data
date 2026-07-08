@@ -57,3 +57,62 @@ class CompetitionData(_BiwengerModel):
 class CompetitionDataResponse(_BiwengerModel):
     status: int
     data: CompetitionData
+
+
+# --- Detalle por jugador y temporada: players/{competición}/{slug} ---------
+#
+# Cada temporada trae un `report` por partido. Los partidos en los que el
+# jugador no puntuó (no convocado, futuro) llegan solo con `match`/`status`;
+# los que puntuaron traen además `points` y `rawStats`. Los cinco sistemas de
+# puntuación se identifican por su id: 1=AS, 2=SofaScore, 3=Estadísticas,
+# 5=Media, 6=Social. No todos aparecen siempre (Segunda no publica 5 ni 6).
+
+
+class Round(_BiwengerModel):
+    id: int
+    name: str
+
+
+class ReportMatch(_BiwengerModel):
+    id: int
+    date: int | None = None
+    round: Round
+
+
+class RawStats(_BiwengerModel):
+    minutes_played: int | None = Field(alias="minutesPlayed", default=None)
+    # Nota SofaScore: solo La Liga la publica; en Segunda el campo no existe.
+    sofascore: float | None = None
+    home_score: int | None = Field(alias="homeScore", default=None)
+    away_score: int | None = Field(alias="awayScore", default=None)
+    win: bool = False
+    lost: bool = False
+    clean_sheet: bool | None = Field(alias="cleanSheet", default=None)
+
+
+class Report(_BiwengerModel):
+    # `home` indica si el equipo del jugador jugaba en casa (local/visitante).
+    home: bool | None = None
+    match: ReportMatch
+    # Presentes solo cuando el jugador puntuó ese partido.
+    points: dict[str, int] | None = None
+    raw_stats: RawStats | None = Field(alias="rawStats", default=None)
+
+    @property
+    def scored(self) -> bool:
+        return self.points is not None and self.raw_stats is not None
+
+
+class PlayerDetail(_BiwengerModel):
+    id: int
+    name: str
+    slug: str
+    birthday: int | None = None
+    reports: list[Report] = Field(default_factory=list)
+    # Precio diario: pares [fecha AAMMDD, precio].
+    prices: list[tuple[int, int]] = Field(default_factory=list)
+
+
+class PlayerDetailResponse(_BiwengerModel):
+    status: int
+    data: PlayerDetail
