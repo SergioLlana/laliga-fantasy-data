@@ -1,0 +1,258 @@
+{
+  "status": 200,
+  "data": {
+    "id": 1,
+    "name": "Primera División",
+    "slug": "la-liga",
+    "season": {
+      "id": "2026",
+      "name": "Temporada 2025/2026",
+      "slug": "2025-2026"
+    },
+    "players": {
+      "17731": {
+        "id": 17731,
+        "name": "Catena",
+        "slug": "a-catena",
+        "teamID": 93,
+        "position": 2,
+        "price": 3130000,
+        "fantasyPrice": 14000000,
+        "number": 24,
+        "status": "ok",
+        "priceIncrement": 30000,
+        "fitness": [
+          2,
+          2,
+          2,
+          2,
+          2
+        ],
+        "points": 143,
+        "playedHome": 19,
+        "playedAway": 16,
+        "pointsHome": 83,
+        "pointsAway": 60,
+        "pointsLastSeason": 111
+      },
+      "37739": {
+        "id": 37739,
+        "name": "De la Fuente",
+        "slug": "a-de-la-fuente",
+        "teamID": 10,
+        "position": 2,
+        "price": 2940000,
+        "fantasyPrice": 8000000,
+        "number": 4,
+        "status": "ok",
+        "priceIncrement": -20000,
+        "fitness": [
+          2,
+          6,
+          11,
+          6,
+          "doubt"
+        ],
+        "points": 151,
+        "playedHome": 18,
+        "playedAway": 15,
+        "pointsHome": 96,
+        "pointsAway": 55,
+        "pointsLastSeason": null
+      },
+      "16606": {
+        "id": 16606,
+        "name": "Aitor Fernández",
+        "slug": "a-fernandez",
+        "teamID": 93,
+        "position": 1,
+        "price": 220000,
+        "fantasyPrice": 8000000,
+        "number": 13,
+        "status": "ok",
+        "priceIncrement": -10000,
+        "fitness": [
+          null,
+          null,
+          6,
+          6,
+          null
+        ],
+        "points": 12,
+        "playedHome": 1,
+        "playedAway": 1,
+        "pointsHome": 6,
+        "pointsAway": 6,
+        "pointsLastSeason": 10
+      },
+      "15462": {
+        "id": 15462,
+        "name": "Gorosabel",
+        "slug": "a-gorosabel",
+        "teamID": 1,
+        "position": 2,
+        "price": 280000,
+        "fantasyPrice": 10000000,
+        "number": 2,
+        "status": "ok",
+        "priceIncrement": 0,
+        "fitness": [
+          2,
+          6,
+          2,
+          6,
+          2
+        ],
+        "points": 62,
+        "playedHome": 12,
+        "playedAway": 12,
+        "pointsHome": 38,
+        "pointsAway": 24,
+        "pointsLastSeason": 76
+      },
+      "24576": {
+        "id": 24576,
+        "name": "Sørloth",
+        "slug": "a-sorloth",
+        "teamID": 2,
+        "position": 4,
+        "price": 4800000,
+        "fantasyPrice": 32000000,
+        "number": 9,
+        "status": "ok",
+        "priceIncrement": 10000,
+        "iconHero": "i/p/hero/24576.png",
+        "fitness": [
+          2,
+          2,
+          9,
+          -2,
+          "injured"
+        ],
+        "points": 123,
+        "playedHome": 18,
+        "playedAway": 17,
+        "pointsHome": 105,
+        "pointsAway": 18,
+        "pointsLastSeason": 188
+      },
+      "41556": {
+        "id": 41556,
+        "name": "Yaakobishvili",
+        "slug": "a-yaakobishvili",
+        "teamID": 3,
+        "position": 1,
+        "price": 200000,
+        "fantasyPrice": 15000000,
+        "number": 0,
+        "status": "ok",
+        "priceIncrement": 10000,
+        "fitness": [],
+        "points": 0,
+        "playedHome": 0,
+        "playedAway": 0,
+        "pointsHome": 0,
+        "pointsAway": 0,
+        "pointsLastSeason": null
+      },
+      "41097": {
+        "id": 41097,
+        "name": "Aarón Ochoa",
+        "slug": "aaron-ochoa",
+        "teamID": 65,
+        "position": 3,
+        "price": 190000,
+        "fantasyPrice": 7000000,
+        "number": 35,
+        "status": "ok",
+        "priceIncrement": 0,
+        "fitness": [],
+        "points": 0,
+        "playedHome": 0,
+        "playedAway": 0,
+        "pointsHome": 0,
+        "pointsAway": 0,
+        "pointsLastSeason": null
+      },
+      "30510": {
+        "id": 30510,
+        "name": "Abde Rebbach",
+        "slug": "abde-rebbach",
+        "teamID": 91,
+        "position": 4,
+        "altPositions": [
+          3
+        ],
+        "price": 1220000,
+        "fantasyPrice": 8000000,
+        "number": 21,
+        "status": "ok",
+        "priceIncrement": -10000,
+        "fitness": [
+          6,
+          6,
+          6,
+          6,
+          6
+        ],
+        "points": 99,
+        "playedHome": 17,
+        "playedAway": 13,
+        "pointsHome": 50,
+        "pointsAway": 49,
+        "pointsLastSeason": 20
+      },
+      "28082": {
+        "id": 28082,
+        "name": "Mumin",
+        "slug": "abdul-mumin",
+        "teamID": null,
+        "position": 2,
+        "price": 200000,
+        "fantasyPrice": 10000000,
+        "number": 16,
+        "status": "ok",
+        "priceIncrement": 0,
+        "fitness": [
+          2,
+          0,
+          null,
+          null,
+          null
+        ],
+        "points": 4,
+        "playedHome": 2,
+        "playedAway": 1,
+        "pointsHome": 2,
+        "pointsAway": 2,
+        "pointsLastSeason": 112
+      }
+    },
+    "teams": {
+      "1": {
+        "id": 1,
+        "name": "Athletic",
+        "slug": "athletic",
+        "nextGames": []
+      },
+      "2": {
+        "id": 2,
+        "name": "Atlético",
+        "slug": "atletico",
+        "nextGames": []
+      },
+      "3": {
+        "id": 3,
+        "name": "Barcelona",
+        "slug": "barcelona",
+        "nextGames": []
+      },
+      "5": {
+        "id": 5,
+        "name": "Celta",
+        "slug": "celta",
+        "nextGames": []
+      }
+    }
+  }
+}

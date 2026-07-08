@@ -7,7 +7,12 @@ name = "lfdata"
 version = "0.1.0"
 description = "Datos y proyecciones para fantasy de La Liga (Biwenger primero)"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "curl-cffi>=0.13",
+    "pandas>=2.2",
+    "pyarrow>=18",
+    "pydantic>=2.9",
+]
 
 [project.scripts]
 lfdata = "lfdata.cli:main"

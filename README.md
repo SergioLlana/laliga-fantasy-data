@@ -16,7 +16,13 @@ uv sync --dev
 
 ```bash
 uv run lfdata --help
+
+# Ingesta de la plantilla de una competición de Biwenger
+uv run lfdata ingest biwenger --competition la-liga
+uv run lfdata ingest biwenger --competition segunda-division
 ```
+
+Los datos se escriben en dos capas bajo la URI de `--data` (por defecto `file://./data`, configurable con `$LFDATA_DATA`): la respuesta cruda tal cual en `raw/` y tablas Parquet en `curated/` (`biwenger_players`, `biwenger_teams`), legibles con pandas o DuckDB.
 
 ## Desarrollo
 

@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Almacenamiento local de datos (raw/ y curated/)
+data/
