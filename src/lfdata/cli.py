@@ -31,6 +31,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Competición a ingerir",
     )
     biwenger.add_argument(
+        "--season",
+        help="Temporada (p. ej. 2026). Si se indica, añade fantasy_points y biwenger_prices",
+    )
+    biwenger.add_argument(
         "--data",
         default=os.environ.get("LFDATA_DATA", DEFAULT_DATA_URI),
         help=f"URI base del almacenamiento (por defecto {DEFAULT_DATA_URI} o $LFDATA_DATA)",
@@ -69,11 +73,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _cmd_ingest_biwenger(args: argparse.Namespace) -> int:
-    from lfdata.sources.biwenger import ingest_squad
+    from lfdata.sources.biwenger import ingest_reports, ingest_squad
     from lfdata.storage import Storage
 
     storage = Storage(args.data)
     rows = ingest_squad(storage, args.competition)
+    if args.season:
+        rows |= ingest_reports(storage, args.competition, args.season)
     for table, count in rows.items():
         print(f"{table}: {count} filas ({args.competition}) -> {args.data}")
     return 0
