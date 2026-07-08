@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pandas as pd
 
-from lfdata.sources.biwenger.client import WAIT_SECONDS, BiwengerClient
-from lfdata.sources.http import HttpTransport
+from lfdata.sources.biwenger.client import PROXY_ENABLED, WAIT_SECONDS, BiwengerClient
+from lfdata.sources.http import HttpTransport, scrapeops_proxy_from_env
 from lfdata.storage import Storage
 
 
@@ -19,7 +19,10 @@ def ingest_squad(
 
     Devuelve el número de filas escritas por tabla.
     """
-    transport = transport or HttpTransport(wait_seconds=WAIT_SECONDS)
+    transport = transport or HttpTransport(
+        wait_seconds=WAIT_SECONDS,
+        proxy=scrapeops_proxy_from_env(enabled=PROXY_ENABLED),
+    )
     client = BiwengerClient(transport, storage.raw)
     data = client.fetch_competition_data(competition).data
 
