@@ -36,7 +36,7 @@ Un solo comando, `lfdata daily`, ejecuta en orden dentro de la tarea Fargate:
 
 Además, un trabajo **semanal** (tras jornada) reentrena y publica una versión nueva como `candidate`; la promoción a `active` es siempre manual (`lfdata models activate`, ver el registro de modelos en el paso 4).
 
-Sin orquestador externo (Airflow, Step Functions): es una secuencia lineal donde si un paso falla, se corta y se notifica (SNS → email). La re-ejecución es idempotente porque `raw/` no se re-descarga y `curated/` se sobrescribe por partición.
+Sin orquestador externo (Airflow, Step Functions): es una secuencia lineal donde si un paso falla, se corta y se notifica (SNS → email). La re-ejecución es idempotente porque `raw/` no se re-descarga y `curated/` se reescribe por partición: Biwenger con refresh completo (`write_table`), y Transfermarkt con upsert por `player_id` (`upsert_table`), que además escribe club a club para que un run interrumpido conserve el progreso.
 
 ## Despliegues
 

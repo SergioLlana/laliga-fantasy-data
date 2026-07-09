@@ -61,6 +61,28 @@ class RawStore:
         self._backend.write_bytes(key, payload)
         return key
 
+    def last_download_date(
+        self, source: str, dataset: str, name: str, *, extension: str = "json"
+    ) -> date | None:
+        """Fecha de descarga más reciente guardada para ``name``, o ``None``.
+
+        Recorre las particiones ``fecha_descarga=YYYY-MM-DD`` del dataset y se
+        queda con la más nueva que contenga el fichero pedido. Sirve para saltar
+        en un backfill lo que ya se descargó hace poco (``--since-days``).
+        """
+        base = self._backend.root / "raw" / source / dataset
+        if not base.exists():
+            return None
+        dates: list[date] = []
+        for partition in base.glob("fecha_descarga=*"):
+            if not (partition / f"{name}.{extension}").exists():
+                continue
+            try:
+                dates.append(date.fromisoformat(partition.name.removeprefix("fecha_descarga=")))
+            except ValueError:
+                continue
+        return max(dates) if dates else None
+
 
 class CuratedStore:
     """Tablas Parquet por nombre, con particiones opcionales estilo Hive."""
@@ -75,17 +97,48 @@ class CuratedStore:
         *,
         partition: Mapping[str, str] | None = None,
     ) -> str:
+        """Reescribe la partición entera (refresh completo)."""
+        key = self._table_key(table, partition)
         if partition:
-            parts = "/".join(f"{key}={value}" for key, value in partition.items())
-            key = f"curated/{table}/{parts}/data.parquet"
             # Estilo Hive: la columna particionada vive en la ruta, no en el fichero.
             df = df.drop(columns=[col for col in partition if col in df.columns])
-        else:
-            key = f"curated/{table}.parquet"
         buffer = io.BytesIO()
         df.to_parquet(buffer, index=False)
         self._backend.write_bytes(key, buffer.getvalue())
         return key
+
+    def upsert_table(
+        self,
+        table: str,
+        df: pd.DataFrame,
+        *,
+        key: str = "player_id",
+        partition: Mapping[str, str] | None = None,
+    ) -> str:
+        """Actualiza filas por ``key`` sin tocar al resto de la partición.
+
+        Lee la partición existente, descarta las filas cuyo ``key`` aparece en el
+        lote entrante y reescribe con las nuevas. Es idempotente (re-escribir el
+        mismo lote deja la tabla igual) y hace la ingesta reanudable: un run
+        parcial refresca solo esos ``key`` sin borrar a los demás. Sobre una
+        partición vacía equivale a :meth:`write_table`.
+        """
+        path = self._backend.root / self._table_key(table, partition)
+        incoming = df.drop(columns=[col for col in (partition or {}) if col in df.columns])
+        if path.exists():
+            existing = pd.read_parquet(path)
+            kept = existing[~existing[key].isin(set(incoming[key]))]
+            combined = pd.concat([kept, incoming], ignore_index=True)
+        else:
+            combined = incoming
+        return self.write_table(table, combined, partition=partition)
+
+    @staticmethod
+    def _table_key(table: str, partition: Mapping[str, str] | None) -> str:
+        if partition:
+            parts = "/".join(f"{name}={value}" for name, value in partition.items())
+            return f"curated/{table}/{parts}/data.parquet"
+        return f"curated/{table}.parquet"
 
     def read_table(self, table: str) -> pd.DataFrame:
         """Lee la tabla completa, incluidas todas sus particiones."""
