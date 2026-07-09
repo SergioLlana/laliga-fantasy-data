@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Datos y proyecciones para fantasy de La Liga (Biwenger primero)"
 requires-python = ">=3.12"
 dependencies = [
+    "beautifulsoup4>=4.15.0",
     "curl-cffi>=0.13",
     "pandas>=2.2",
     "pyarrow>=18",

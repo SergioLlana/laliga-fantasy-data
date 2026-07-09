@@ -24,7 +24,7 @@ Los términos del dominio están definidos en [CONTEXT.md](../CONTEXT.md) y las 
 |---|---|---|
 | Biwenger | Jugadores, precios diarios (histórico por temporada), puntos por partido en los cinco sistemas de puntuación, minutos jugados y nota SofaScore por partido, jornadas | API no oficial (JSON), verificada: acepta `season=YYYY` para históricos |
 | SofaScore | Nota y estadísticas por jugador-partido (115 campos por temporada), en La Liga y el resto de ligas, incluidas categorías inferiores | API no oficial (JSON); requiere impersonación de Chrome (curl-cffi) |
-| Transfermarkt | Valor de mercado, traspasos y cesiones, datos biográficos | Endpoints JSON internos (`ceapi`) para valores y traspasos; HTML solo para búsqueda y perfil |
+| Transfermarkt | Valor de mercado, traspasos y cesiones, datos biográficos, disponibilidad por partido e historial de lesiones | Endpoints JSON internos (`ceapi`) para valores, traspasos y rendimiento/disponibilidad (`performance-game`); HTML para búsqueda, perfil y lesiones |
 | FotMob (verificado 2026-07-07) | Redundancia de SofaScore: estadísticas por jugador-partido, con nota propia | API no oficial (JSON); requiere impersonación de Chrome |
 
 Normas de descarga para todas las fuentes: una petición cada pocos segundos, reintentos con espera creciente, identificación de navegador realista, y toda respuesta se guarda antes de interpretarla. La capa de red está abstraída para poder enchufar un proveedor de proxies (ScrapeOps, empezando por su plan gratuito) si una fuente empieza a bloquearnos. Cada ingestor valida la estructura de la página o respuesta y falla con un error claro si la fuente cambió su formato.
