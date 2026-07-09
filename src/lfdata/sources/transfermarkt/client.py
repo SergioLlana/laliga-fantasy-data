@@ -26,7 +26,11 @@ from lfdata.sources.transfermarkt.parse import (
 )
 from lfdata.storage import RawStore
 
-BASE = "https://www.transfermarkt.es"
+# Usamos el host .com a propósito: sus respuestas (posiciones, tipo de traspaso,
+# diagnósticos de lesión, nombres de club) vienen en inglés. Todo lo que se cura
+# queda así en inglés, no en español. Los endpoints y el formato son idénticos a
+# los de cualquier otro host de Transfermarkt (fechas en dd/mm/YYYY igualmente).
+BASE = "https://www.transfermarkt.com"
 # Transfermarkt no bloquea con UA de navegador y espera educada de 4 s; el
 # transporte común ya impersona Chrome. No enruta por ScrapeOps (ver #28).
 WAIT_SECONDS = 4.0

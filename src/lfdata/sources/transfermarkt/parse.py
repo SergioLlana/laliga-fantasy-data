@@ -194,7 +194,7 @@ def parse_profile(payload: bytes | str, *, player_id: int) -> PlayerProfile:
 
     position = None
     for label in soup.find_all("li", class_="data-header__label"):
-        if "Posición" in label.get_text():
+        if "Position" in label.get_text():
             content = label.find("span", class_="data-header__content")
             position = content.get_text(strip=True) if content else None
             break
@@ -223,18 +223,18 @@ def market_value_rows(graph: MarketValueGraph, *, player_id: int) -> list[dict]:
 
 
 def classify_transfer(fee: str) -> str:
-    """Clasifica un movimiento en cesión, fin de cesión o traspaso.
+    """Clasifica un movimiento en 'loan', 'end of loan' o 'transfer'.
 
-    Transfermarkt.es rotula el coste en español: 'Cesión', 'Fin de cesión', o
-    bien un importe / 'Libre' / '-' para un traspaso. Comparamos sin tildes por
-    robustez.
+    Transfermarkt.com rotula el coste en inglés: 'End of loan', 'loan transfer',
+    o bien un importe / 'free transfer' / '-' para un traspaso normal. La salida
+    también es inglesa, para que la tabla curada quede en inglés.
     """
     normalized = _norm(fee)
-    if "fin de cesion" in normalized:
-        return "fin de cesión"
-    if "cesion" in normalized:
-        return "cesión"
-    return "traspaso"
+    if "end of loan" in normalized:
+        return "end of loan"
+    if "loan" in normalized:
+        return "loan"
+    return "transfer"
 
 
 def transfer_rows(history: TransferHistory, *, player_id: int) -> list[dict]:

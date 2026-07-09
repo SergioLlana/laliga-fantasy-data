@@ -94,7 +94,7 @@ def test_fetch_squad(storage: Storage) -> None:
     assert len(squad) == 39
     keeper = squad[0]
     assert keeper.name == "Aarón Escandell"
-    assert keeper.position == "Portero"
+    assert keeper.position == "Goalkeeper"
     assert keeper.slug == "aaron-escandell"
     assert keeper.shirt_number == 13
 
@@ -106,7 +106,7 @@ def test_fetch_player_profile(storage: Storage) -> None:
     )
     assert profile.name == "Álex Forés"
     assert profile.birth_date == date(2001, 4, 12)
-    assert profile.position == "Delantero centro"
+    assert profile.position == "Centre-Forward"
 
 
 def test_profile_name_drops_shirt_number() -> None:
@@ -146,13 +146,13 @@ def test_transfers_reproduce_loan_chain(storage: Storage) -> None:
     history = TransfermarktClient(transport, storage.raw).fetch_transfers(FORES)
     rows = transfer_rows(history, player_id=FORES)
     chain = {(row["date"], row["type"], row["from_club_name"], row["to_club_name"]) for row in rows}
-    assert (date(2025, 1, 20), "cesión", "Villarreal", "Levante UD") in chain
-    assert (date(2025, 6, 30), "fin de cesión", "Levante UD", "Villarreal") in chain
-    assert (date(2025, 7, 24), "cesión", "Villarreal", "Real Oviedo") in chain
-    assert (date(2026, 6, 30), "fin de cesión", "Real Oviedo", "Villarreal") in chain
-    # Un traspaso real (subida al primer equipo) queda como 'traspaso'.
+    assert (date(2025, 1, 20), "loan", "Villarreal", "Levante") in chain
+    assert (date(2025, 6, 30), "end of loan", "Levante", "Villarreal") in chain
+    assert (date(2025, 7, 24), "loan", "Villarreal", "Real Oviedo") in chain
+    assert (date(2026, 6, 30), "end of loan", "Real Oviedo", "Villarreal") in chain
+    # Un traspaso real (subida al primer equipo) queda como 'transfer'.
     types = {row["type"] for row in rows}
-    assert types == {"cesión", "fin de cesión", "traspaso"}
+    assert types == {"loan", "end of loan", "transfer"}
 
 
 def test_transfers_carry_club_ids(storage: Storage) -> None:
@@ -166,11 +166,11 @@ def test_transfers_carry_club_ids(storage: Storage) -> None:
 
 
 def test_classify_transfer() -> None:
-    assert classify_transfer("Cesión") == "cesión"
-    assert classify_transfer("Fin de cesión") == "fin de cesión"
-    assert classify_transfer("1,50 mill. €") == "traspaso"
-    assert classify_transfer("Libre") == "traspaso"
-    assert classify_transfer("-") == "traspaso"
+    assert classify_transfer("loan transfer") == "loan"
+    assert classify_transfer("End of loan") == "end of loan"
+    assert classify_transfer("€1.50m") == "transfer"
+    assert classify_transfer("free transfer") == "transfer"
+    assert classify_transfer("-") == "transfer"
 
 
 # --- disponibilidad (performance-game) ---------------------------------------
@@ -213,7 +213,7 @@ def test_fetch_injuries(storage: Storage) -> None:
     injuries = TransfermarktClient(transport, storage.raw).fetch_injuries(FORES, slug="alex-fores")
     assert len(injuries) == 1
     injury = injuries[0]
-    assert injury.injury == "Fractura de tibia"
+    assert injury.injury == "Broken tibia"
     assert injury.from_date == date(2024, 5, 14)
     assert injury.until_date == date(2025, 1, 1)
     assert injury.days == 233
@@ -268,7 +268,7 @@ def test_ingest_squads_writes_curated_tables(storage: Storage, tmp_path: Path) -
     assert parquet.exists()
 
     transfers = storage.curated.read_table("transfers")
-    assert set(transfers["type"].unique()) == {"cesión", "fin de cesión", "traspaso"}
+    assert set(transfers["type"].unique()) == {"loan", "end of loan", "transfer"}
 
     availability = storage.curated.read_table("availability_tm")
     assert {"player_id", "game_id", "participation_state", "played_minutes", "competition"} <= set(

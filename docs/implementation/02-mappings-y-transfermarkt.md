@@ -11,6 +11,8 @@
 
 ### `lfdata.sources.transfermarkt`
 
+Se scrapea desde el host **`transfermarkt.com`** a propósito, no desde `.es`: así los textos (posición, tipo de traspaso, diagnóstico de lesión, nombres de club) vienen en **inglés** y las tablas curadas quedan en inglés, no en español. Los endpoints y el formato son idénticos entre hosts (fechas en `dd/mm/YYYY` igualmente).
+
 - Búsqueda: `GET /schnellsuche/ergebnis/schnellsuche?query={nombre}` (HTML, extraer `/{slug}/profil/spieler/{id}`).
 - Perfil: `GET /{slug}/profil/spieler/{id}` (HTML: fecha de nacimiento, posición, pie, altura, nacionalidad).
 - Valores: `GET /ceapi/marketValueDevelopment/graph/{id}` (JSON: fecha, valor, club en esa fecha).
@@ -51,7 +53,7 @@ Lección del experimento Forés: el club del perfil es "dueño actual", no "dón
 | `teams` | equipo canónico | canonical_id, nombre, país |
 | `player_mappings` / `team_mappings` | mapping | fuente, id en fuente, canonical_id |
 | `market_values_tm` | jugador-fecha | valor Transfermarkt y club en esa fecha |
-| `transfers` | movimiento | fecha, origen, destino, tipo (cesión/fin de cesión/traspaso), coste |
+| `transfers` | movimiento | fecha, origen, destino, tipo (`loan`/`end of loan`/`transfer`), coste |
 | `availability_tm` | jugador-partido | estado de participación, minutos, titular/suplente, minuto de cambio (de `performance-game`) |
 | `injuries_tm` | lesión | temporada, diagnóstico, desde, hasta, días de baja, partidos perdidos (de la página de lesiones) |
 
