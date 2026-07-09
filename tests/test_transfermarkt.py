@@ -287,6 +287,68 @@ def test_ingest_squads_writes_curated_tables(storage: Storage, tmp_path: Path) -
     )
 
 
+class FailAfterFirstClubTransport(RoutingTransport):
+    """Como RoutingTransport, pero cae al pedir la plantilla del segundo club."""
+
+    def __init__(self, routes: dict[str, bytes]) -> None:
+        super().__init__(routes)
+        self.squad_fetches = 0
+
+    def get(self, url: str, params=None) -> bytes:
+        if "kader/verein" in url:
+            self.squad_fetches += 1
+            if self.squad_fetches > 1:
+                raise RuntimeError("red caída a mitad de run")
+        return super().get(url, params)
+
+
+def test_ingest_preserves_progress_of_written_clubs_on_failure(
+    storage: Storage, tmp_path: Path
+) -> None:
+    transport = FailAfterFirstClubTransport(default_routes())
+    with pytest.raises(RuntimeError, match="red caída"):
+        ingest_squads(storage, "la-liga", season=2025, transport=transport, max_clubs=2)
+
+    # El primer club se escribió por upsert antes de que fallara el segundo.
+    players = storage.curated.read_table("transfermarkt_players")
+    assert len(players) == 39
+
+
+def test_ingest_is_idempotent(storage: Storage) -> None:
+    first = ingest_squads(
+        storage, "la-liga", season=2025, transport=RoutingTransport(default_routes()), max_clubs=1
+    )
+    second = ingest_squads(
+        storage, "la-liga", season=2025, transport=RoutingTransport(default_routes()), max_clubs=1
+    )
+    assert second == first  # correr al mismo jugador dos veces no duplica
+
+    players = storage.curated.read_table("transfermarkt_players")
+    assert len(players) == first["transfermarkt_players"]
+    values = storage.curated.read_table("market_values_tm")
+    assert len(values) == first["market_values_tm"]
+
+
+def test_ingest_since_days_skips_recently_scraped(storage: Storage) -> None:
+    ingest_squads(
+        storage, "la-liga", season=2025, transport=RoutingTransport(default_routes()), max_clubs=1
+    )
+    before = storage.curated.read_table("transfermarkt_players")
+
+    # Todos se descargaron hoy: con una ventana amplia, se saltan todos.
+    totals = ingest_squads(
+        storage,
+        "la-liga",
+        season=2025,
+        transport=RoutingTransport(default_routes()),
+        max_clubs=1,
+        since_days=30,
+    )
+    assert totals == dict.fromkeys(totals, 0)
+    after = storage.curated.read_table("transfermarkt_players")
+    assert len(after) == len(before)  # la partición queda intacta
+
+
 def test_cli_ingest_end_to_end(tmp_path: Path, monkeypatch, capsys) -> None:
     routes = default_routes()
 

@@ -14,6 +14,8 @@ mapping a IDs canónicos es un paso posterior):
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pandas as pd
 
 from lfdata.sources.http import HttpTransport, scrapeops_proxy_from_env
@@ -29,6 +31,16 @@ from lfdata.storage import Storage
 # (2025 = temporada 2025-26).
 DEFAULT_SEASON = 2025
 
+# Cada tabla es un snapshot de historia completa por jugador; el upsert por club
+# la actualiza clave a clave. ``transfermarkt_players`` se indexa por ``id``.
+_TABLE_KEYS = {
+    "transfermarkt_players": "id",
+    "market_values_tm": "player_id",
+    "transfers": "player_id",
+    "availability_tm": "player_id",
+    "injuries_tm": "player_id",
+}
+
 
 def ingest_squads(
     storage: Storage,
@@ -37,12 +49,20 @@ def ingest_squads(
     season: int = DEFAULT_SEASON,
     transport: HttpTransport | None = None,
     max_clubs: int | None = None,
+    since_days: int | None = None,
 ) -> dict[str, int]:
-    """Descarga la competición completa y publica las cinco tablas curadas.
+    """Descarga la competición y publica las cinco tablas curadas, club a club.
+
+    Cada club se escribe con ``upsert_table`` en cuanto se termina de recorrer,
+    de modo que un run que falla a mitad conserva el progreso de los clubes ya
+    escritos. Correr la competición entera equivale a un refresh completo; un run
+    parcial (``max_clubs``) refresca solo esos jugadores sin tocar al resto.
 
     ``max_clubs`` limita el número de clubes recorridos (útil para una primera
     prueba real, dado que el recorrido completo son miles de peticiones a 4 s).
-    Devuelve el número de filas escritas por tabla.
+    ``since_days`` salta a los jugadores cuya descarga en ``raw/`` sea más
+    reciente que ese número de días, para reanudar un backfill sin re-scrapear lo
+    ya bajado. Devuelve el número de filas escritas por tabla.
     """
     transport = transport or HttpTransport(
         wait_seconds=WAIT_SECONDS,
@@ -54,15 +74,20 @@ def ingest_squads(
     if max_clubs is not None:
         clubs = clubs[:max_clubs]
 
-    player_records: list[dict] = []
-    value_records: list[dict] = []
-    transfer_records: list[dict] = []
-    availability_records: list[dict] = []
-    injury_records: list[dict] = []
+    partition = {"competition": competition}
+    totals = dict.fromkeys(_TABLE_KEYS, 0)
 
     for club in clubs:
+        player_records: list[dict] = []
+        value_records: list[dict] = []
+        transfer_records: list[dict] = []
+        availability_records: list[dict] = []
+        injury_records: list[dict] = []
+
         for member in client.fetch_squad(club.id, season=season):
             player_id = member.player_id
+            if since_days is not None and _scraped_within(storage, player_id, since_days):
+                continue
             profile = client.fetch_player_profile(player_id, slug=member.slug)
             player_records.append(
                 {
@@ -90,17 +115,35 @@ def ingest_squads(
                 for injury in client.fetch_injuries(player_id, slug=member.slug)
             ]
 
-    frames = {
-        "transfermarkt_players": _players_frame(player_records),
-        "market_values_tm": _values_frame(value_records),
-        "transfers": _transfers_frame(transfer_records),
-        "availability_tm": _availability_frame(availability_records),
-        "injuries_tm": _injuries_frame(injury_records),
-    }
-    partition = {"competition": competition}
-    for table, frame in frames.items():
-        storage.curated.write_table(table, frame, partition=partition)
-    return {table: len(frame) for table, frame in frames.items()}
+        if not player_records:  # club con todos los jugadores saltados
+            continue
+
+        frames = {
+            "transfermarkt_players": _players_frame(player_records),
+            "market_values_tm": _values_frame(value_records),
+            "transfers": _transfers_frame(transfer_records),
+            "availability_tm": _availability_frame(availability_records),
+            "injuries_tm": _injuries_frame(injury_records),
+        }
+        for table, frame in frames.items():
+            storage.curated.upsert_table(table, frame, key=_TABLE_KEYS[table], partition=partition)
+            totals[table] += len(frame)
+
+    return totals
+
+
+def _scraped_within(storage: Storage, player_id: int, since_days: int) -> bool:
+    """¿Se descargó a este jugador entero en los últimos ``since_days`` días?
+
+    Usa las lesiones como marca de descarga: son la última petición por jugador,
+    así que su presencia indica un scrape completo (no uno interrumpido a medias).
+    """
+    last = storage.raw.last_download_date(
+        "transfermarkt", "injuries", f"spieler-{player_id}", extension="html"
+    )
+    if last is None:
+        return False
+    return last > datetime.now(tz=UTC).date() - timedelta(days=since_days)
 
 
 def _players_frame(records: list[dict]) -> pd.DataFrame:

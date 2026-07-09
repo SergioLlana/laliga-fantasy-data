@@ -63,6 +63,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Limita el número de clubes recorridos (prueba parcial)",
     )
     transfermarkt.add_argument(
+        "--since-days",
+        type=int,
+        default=None,
+        help="Salta jugadores ya descargados en los últimos N días (reanudar backfill)",
+    )
+    transfermarkt.add_argument(
         "--data",
         default=os.environ.get("LFDATA_DATA", DEFAULT_DATA_URI),
         help=f"URI base del almacenamiento (por defecto {DEFAULT_DATA_URI} o $LFDATA_DATA)",
@@ -95,6 +101,7 @@ def _cmd_ingest_transfermarkt(args: argparse.Namespace) -> int:
         args.competition,
         season=args.season,
         max_clubs=args.max_clubs,
+        since_days=args.since_days,
     )
     for table, count in rows.items():
         print(f"{table}: {count} filas ({args.competition}) -> {args.data}")
