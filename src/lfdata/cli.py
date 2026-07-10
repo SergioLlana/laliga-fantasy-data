@@ -131,26 +131,33 @@ def _cmd_ingest_transfermarkt(args: argparse.Namespace) -> int:
 
 
 def _cmd_map(args: argparse.Namespace) -> int:
-    from lfdata.mappings import check_mappings, run_map
+    from lfdata.mappings import MappingIntegrityError, check_mappings, run_map
     from lfdata.storage import Storage
 
     storage = Storage(args.data)
-    if args.check:
-        problems = check_mappings(storage, args.mappings)
-        for problem in problems:
-            print(problem)
-        if problems:
-            print(
-                f"\n{len(problems)} filas sin mapping. Ejecuta `lfdata map` y revisa los dudosos."
-            )
-            return 1
-        print("Todos los jugadores y equipos de Biwenger tienen mapping.")
-        return 0
+    try:
+        if args.check:
+            problems = check_mappings(storage, args.mappings)
+            for problem in problems:
+                print(problem)
+            if problems:
+                print(
+                    f"\n{len(problems)} filas sin mapping. "
+                    "Ejecuta `lfdata map` y revisa los dudosos."
+                )
+                return 1
+            print("Todos los jugadores y equipos de Biwenger tienen mapping.")
+            return 0
 
-    report = run_map(storage, args.mappings)
-    print(report.render())
-    print(f"Mappings escritos en {args.mappings}/")
-    return 0
+        report = run_map(storage, args.mappings)
+        print(report.render())
+        print(f"Mappings escritos en {args.mappings}/")
+        return 0
+    except MappingIntegrityError as error:
+        print("Integridad de mappings violada — corrige los ficheros y vuelve a ejecutar:")
+        for problem in error.problems:
+            print(f"  - {problem}")
+        return 1
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -30,4 +30,29 @@ que el desempate por fecha se hace a mano con la evidencia de Transfermarkt
    (como `manual`) y vuelve a proponer solo lo que siga sin resolver. Es
    idempotente: lo aprobado no se vuelve a tocar.
 4. `lfdata map --check` falla (CI y pipeline) si algún jugador o equipo de
-   Biwenger presente en las tablas curadas se quedó sin `canonical_id`.
+   Biwenger presente en las tablas curadas se quedó sin `canonical_id`, o si los
+   ficheros de aprobados violan la integridad (ver abajo).
+
+## Decisiones que no se pueden aplicar
+
+`lfdata map` nunca borra una `decision` escrita a mano. Si una decisión no se
+puede aplicar, se **conserva** en el fichero de revisión (para que la corrijas en
+vez de reescribirla) y se lista en el informe con su motivo:
+
+- `varios-y` — más de un `y` en el mismo jugador/equipo.
+- `y-sin-candidato` — `y` en una fila sin candidato de Transfermarkt.
+- `y-con-skip` — `y` y `skip` mezclados.
+- `token-no-reconocido` — la `decision` no es `y`, `skip` ni un sinónimo válido.
+- `tm-id-ya-tomado` — el candidato elegido ya está mapeado a otra identidad
+  canónica.
+
+## Integridad de los aprobados
+
+`players.csv`/`teams.csv` se editan a mano, así que `lfdata map` (y `--check`)
+valida su integridad al cargarlos y falla señalando las filas si se viola alguna
+de estas reglas (relación del dominio, ADR 0001 — un canónico tiene como máximo
+un mapping por fuente):
+
+- `(fuente, id_en_fuente)` único en todo el fichero.
+- cada `canonical_id` con como máximo una fila por fuente.
+- `canonical_id` con formato reconocible (`p…` para jugadores, `t…` para equipos).
