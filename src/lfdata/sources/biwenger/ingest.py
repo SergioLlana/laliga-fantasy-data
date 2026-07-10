@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, Mapping
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 import pandas as pd
 
@@ -266,6 +266,50 @@ def _refresh_players(
     return result
 
 
+# Métricas del recorrido de reports para el resumen del run.
+REFRESHED = "jugadores refrescados"
+SKIPPED = "jugadores saltados"
+
+
+def _players_to_refresh(
+    storage: Storage,
+    competition: str,
+    season: str,
+    players: list[Player],
+    *,
+    since_days: int | None,
+    resume: bool,
+) -> tuple[list[Player], int]:
+    """Divide la plantilla en (a descargar, nº saltados) por reanudación.
+
+    Un jugador cuyo report de esta temporada ya está en ``raw/`` se salta para no
+    re-descargarlo al reanudar un backfill cortado (o por la cuota):
+
+    - con ``resume`` (temporada pasada, inmutable) basta con que el raw exista, sin
+      ventana de días;
+    - con ``since_days`` (temporada actual) solo si se bajó hace menos de N días.
+
+    El raw se escribe de forma atómica y solo tras un 2xx (un 404 o corte lanza
+    antes de guardar), así que su presencia marca una descarga completa, nunca una
+    interrumpida a medias. Sin ninguno de los dos modos, no se salta a nadie.
+    """
+    if not resume and since_days is None:
+        return players, 0
+    cutoff = datetime.now(tz=UTC).date() - timedelta(days=since_days) if since_days else None
+    to_refresh: list[Player] = []
+    skipped = 0
+    for player in players:
+        last = storage.raw.last_download_date(
+            "biwenger", "player-reports", f"{competition}-{player.slug}-{season}"
+        )
+        already = last is not None and (resume or (cutoff is not None and last > cutoff))
+        if already:
+            skipped += 1
+        else:
+            to_refresh.append(player)
+    return to_refresh, skipped
+
+
 def ingest_reports(
     storage: Storage,
     competition: str,
@@ -273,6 +317,8 @@ def ingest_reports(
     *,
     transport: HttpTransport | None = None,
     batch_size: int = REPORTS_BATCH_SIZE,
+    since_days: int | None = None,
+    resume: bool = False,
 ) -> IngestResult:
     """Publica fantasy_points y biwenger_prices recorriendo la plantilla entera.
 
@@ -280,6 +326,11 @@ def ingest_reports(
     completo de una temporada (bootstrap y backfill); para el mantenimiento
     diario tras jornada, :func:`ingest_reports_delta` refresca solo a quienes
     puntuaron. Devuelve las filas escritas por tabla y los jugadores fallidos.
+
+    Para reanudar un backfill cortado sin repetir peticiones, ``resume`` (temporada
+    pasada inmutable) salta a quien ya tiene su report en ``raw/`` y ``since_days``
+    (temporada actual) a quien se bajó hace menos de N días; los saltados cuentan
+    como vistos en ``stats``. Sin ninguno de los dos, recorre la plantilla entera.
     """
     transport = transport or HttpTransport(
         wait_seconds=WAIT_SECONDS,
@@ -287,25 +338,31 @@ def ingest_reports(
     )
     client = BiwengerClient(transport, storage.raw)
     data = client.fetch_competition_data(competition).data
-    result = _refresh_players(
-        client, storage, competition, season, list(data.players.values()), batch_size=batch_size
-    )
-    logger.info(
-        "biwenger reports %s %s: %d filas de puntos, %d de precios, %d fallidos, "
-        "%d reports con puntos sin rawStats",
+    to_refresh, skipped = _players_to_refresh(
+        storage,
         competition,
         season,
+        list(data.players.values()),
+        since_days=since_days,
+        resume=resume,
+    )
+    result = _refresh_players(
+        client, storage, competition, season, to_refresh, batch_size=batch_size
+    )
+    result.stats = {REFRESHED: len(to_refresh), SKIPPED: skipped}
+    logger.info(
+        "biwenger reports %s %s: %d refrescados, %d saltados, %d filas de puntos, %d de precios, "
+        "%d fallidos, %d reports con puntos sin rawStats",
+        competition,
+        season,
+        len(to_refresh),
+        skipped,
         result.rows["fantasy_points"],
         result.rows["biwenger_prices"],
         len(result.failures),
         result.anomalies.get(POINTS_WITHOUT_STATS, 0),
     )
     return result
-
-
-# Métricas del refresh por deltas para el resumen del run.
-REFRESHED = "jugadores refrescados"
-SKIPPED = "jugadores saltados"
 
 
 def _scoring_player_ids(round_data: RoundData) -> set[int]:
