@@ -20,6 +20,11 @@ from urllib.parse import urlencode
 
 RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 
+# Por el proxy las peticiones tardan bastante más (la plantilla de la-liga son
+# ~37 s: payload grande + salto ScrapeOps), así que el timeout por defecto de
+# 30 s de curl no basta. 90 s deja margen sin colgarse indefinidamente.
+REQUEST_TIMEOUT_SECONDS = 90.0
+
 SCRAPEOPS_ENDPOINT = "https://proxy.scrapeops.io/v1/"
 SCRAPEOPS_KEY_ENV = "LFDATA_SCRAPEOPS_KEY"
 
@@ -86,7 +91,19 @@ class _Session(Protocol):
 def _default_session() -> _Session:
     from curl_cffi import requests as curl_requests
 
-    return curl_requests.Session(impersonate="chrome")
+    return curl_requests.Session(impersonate="chrome", timeout=REQUEST_TIMEOUT_SECONDS)
+
+
+def _default_retryable_exceptions() -> tuple[type[BaseException], ...]:
+    """Errores de transporte que merecen reintento (timeout, corte de conexión).
+
+    Import perezoso: solo el backend real (curl-cffi) los produce; los tests
+    inyectan sus propias excepciones. Un timeout aislado a través del proxy es
+    transitorio —conviene reintentar, no abortar el run entero por él—.
+    """
+    from curl_cffi.requests.exceptions import RequestException
+
+    return (RequestException,)
 
 
 class HttpTransport:
@@ -100,6 +117,7 @@ class HttpTransport:
         retry_wait_seconds: float = 5.0,
         session: _Session | None = None,
         proxy: ScrapeOpsProxy | None = None,
+        retryable_exceptions: tuple[type[BaseException], ...] | None = None,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -108,6 +126,11 @@ class HttpTransport:
         self._retry_wait_seconds = retry_wait_seconds
         self._session = session or _default_session()
         self._proxy = proxy
+        self._retryable_exceptions = (
+            retryable_exceptions
+            if retryable_exceptions is not None
+            else _default_retryable_exceptions()
+        )
         self._sleep = sleep
         self._clock = clock
         self._last_request_at: float | None = None
@@ -118,7 +141,16 @@ class HttpTransport:
             request_url, request_params = self._proxy.wrap(url, params)
         for attempt in range(self._max_retries + 1):
             self._wait_turn()
-            response = self._session.get(request_url, params=request_params)
+            try:
+                response = self._session.get(request_url, params=request_params)
+            except self._retryable_exceptions as error:
+                # Timeout o corte de red: reintenta con espera creciente. Agotados
+                # los intentos, se traduce a un 504 para que la fuente lo trate
+                # como cualquier otro fallo (p. ej. saltar el jugador), no crashee.
+                if attempt < self._max_retries:
+                    self._sleep(self._retry_wait_seconds * 2**attempt)
+                    continue
+                raise SourceHTTPError(url, 504, proxy_active=self._proxy is not None) from error
             if response.status_code == 200:
                 return response.content
             if response.status_code in RETRYABLE_STATUSES and attempt < self._max_retries:

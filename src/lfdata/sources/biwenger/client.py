@@ -18,9 +18,12 @@ WAIT_SECONDS = 2.0
 # Campos del detalle por jugador: un report por partido (puntos en los cinco
 # sistemas, minutos y nota SofaScore vía rawStats) y el precio diario.
 PLAYER_FIELDS = "*,reports(points,home,status,match(*,round),rawStats),prices,seasons"
-# Biwenger es una API JSON que no bloquea con esperas educadas: no enruta por
-# ScrapeOps. Las fuentes que sí lo necesiten ponen esto a True (ver #28).
-PROXY_ENABLED = False
+# Biwenger corta con 429 a las ~200 peticiones por ventana e IP, aunque se
+# espere 2 s entre ellas (comprobado ingiriendo la-liga 2025: bloqueo limpio en
+# el jugador ~200). Se enruta por ScrapeOps para rotar IPs y completar la
+# temporada en un run. El proxy solo se activa si además hay LFDATA_SCRAPEOPS_KEY
+# en el entorno; sin clave, el transporte va directo (ver #28).
+PROXY_ENABLED = True
 
 
 class SourceFormatError(Exception):
