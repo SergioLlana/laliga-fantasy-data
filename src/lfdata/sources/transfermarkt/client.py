@@ -41,9 +41,9 @@ SLUG_PLACEHOLDER = "spieler"
 # los de cualquier otro host de Transfermarkt (fechas en dd/mm/YYYY igualmente).
 BASE = "https://www.transfermarkt.com"
 # Transfermarkt no bloquea con UA de navegador y espera educada de 4 s; el
-# transporte común ya impersona Chrome. No enruta por ScrapeOps (ver #28).
+# transporte común ya impersona Chrome. Sin desbordamiento a ScrapeOps (ver #28).
 WAIT_SECONDS = 4.0
-PROXY_ENABLED = False
+PROXY_OVERFLOW = False
 
 # Competición de la plataforma -> (slug de URL, código de wettbewerb de Transfermarkt).
 COMPETITIONS = {
