@@ -69,7 +69,7 @@ La proyección por jornada es el producto de ambos. Para fichajes sin historial 
 
 Enfoque en dos iteraciones: primero GLM jerárquico con statsmodels, después el mismo diseño en Stan (cmdstanpy) para incertidumbre completa. Validación: entrenar con temporadas pasadas y evaluar sobre la temporada siguiente (nunca mezclar futuro en el entrenamiento). Referencia mínima a batir: "los puntos de la próxima jornada son la media de las últimas cinco".
 
-Cobertura de eventing: La Liga y Segunda (Biwenger + SofaScore), las 5 grandes ligas europeas completas, y el resto de ligas bajo demanda por jugador cuando aparece un fichaje.
+Cobertura de eventing: La Liga y Segunda (Biwenger + SofaScore), las 5 grandes ligas europeas completas, y el resto de ligas bajo demanda por jugador cuando aparece un fichaje. **Segunda es solo histórico** (decidido el 2026-07-10): alimenta los baselines de ascendidos, así que se backfillea y se re-ingiere completa una vez al cierre de cada temporada; durante la temporada no se refresca (bajo demanda si un jugador sube en el mercado de invierno).
 
 ## Aplicación web
 

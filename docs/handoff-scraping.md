@@ -1,5 +1,15 @@
 # Handoff: scraping de Biwenger, Transfermarkt y SofaScore
 
+> **RESUELTO el 2026-07-10.** La sesión de diseño posterior fijó la estrategia:
+> ScrapeOps como desbordamiento (ADR 0004), Segunda solo histórico (plan.md §cobertura),
+> backfill de Biwenger con detalle + rounds históricos (implementation/01 §6),
+> backfill de SofaScore sincronizado con el mes de proxy de pago (implementation/03),
+> e incremental diario por deltas en Fargate (implementation/07). Hallazgos de API
+> nuevos: endpoint `rounds/{comp}/{id}` (sirve temporadas pasadas, enumera a los
+> jugadores que se fueron), la plantilla ignora `season`, y el detalle devuelve 404
+> para jugadores fuera de la competición. Este documento queda como contexto
+> histórico de los números medidos.
+
 Documento para un agente que va a **optimizar el scraping**. Describe cómo se
 descarga cada fuente hoy, por qué usamos ScrapeOps y cuántas peticiones cuesta
 cada cosa. El objetivo del lector es reducir tiempo y consumo de créditos sin

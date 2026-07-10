@@ -21,7 +21,7 @@ import pandas as pd
 
 from lfdata.sources.http import HttpTransport, SourceHTTPError, scrapeops_proxy_from_env
 from lfdata.sources.ingestion import IngestResult, PlayerFailure
-from lfdata.sources.transfermarkt.client import PROXY_ENABLED, WAIT_SECONDS, TransfermarktClient
+from lfdata.sources.transfermarkt.client import PROXY_OVERFLOW, WAIT_SECONDS, TransfermarktClient
 from lfdata.sources.transfermarkt.parse import (
     availability_rows,
     market_value_rows,
@@ -76,7 +76,7 @@ def ingest_squads(
     """
     transport = transport or HttpTransport(
         wait_seconds=WAIT_SECONDS,
-        proxy=scrapeops_proxy_from_env(enabled=PROXY_ENABLED),
+        overflow_proxy=scrapeops_proxy_from_env(enabled=PROXY_OVERFLOW),
     )
     client = TransfermarktClient(transport, storage.raw)
 

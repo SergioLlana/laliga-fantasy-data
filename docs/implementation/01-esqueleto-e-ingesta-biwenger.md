@@ -25,8 +25,9 @@
 
 Endpoints (verificados el 2026-07-07, ver `docs/experiments/2026-07-07-alex-fores.md`):
 
-- `competitions/{la-liga|segunda-division}/data?lang=es&score=1` → plantilla completa de la competición: jugadores (precio, incremento, posición, estado), equipos y jornadas.
-- `players/{competición}/{slug}?fields=*,reports(points,home,status,match(*,round),rawStats),prices,seasons&season=YYYY` → por jugador y temporada: un report por partido con puntos en los cinco sistemas de puntuación, minutos, nota SofaScore (solo La Liga), y precios diarios.
+- `competitions/{la-liga|segunda-division}/data?lang=es&score=1` → plantilla completa de la competición: jugadores (precio, incremento, posición, estado, **puntos acumulados**), equipos y jornadas. Ignora el parámetro `season`: siempre devuelve la temporada actual.
+- `players/{competición}/{slug}?fields=*,reports(points,home,status,match(*,round),rawStats),prices,seasons&season=YYYY` → por jugador y temporada: un report por partido con puntos en los cinco sistemas de puntuación, minutos, nota SofaScore (solo La Liga), y precios diarios. Solo sirve a jugadores presentes en la plantilla actual; los que dejaron la competición devuelven 404.
+- `rounds/{competición}/{round_id}?score=N` (verificado el 2026-07-10) → los partidos de una jornada con la lista de **todos** los jugadores que puntuaron (incluidos los que ya no están en la competición), sus eventos y sus puntos bajo el sistema `N`. Sin `rawStats` (ni minutos ni nota). Los `round_id` de temporadas pasadas se obtienen de los reports de cualquier jugador veterano y siguen siendo accesibles.
 
 Validación de estructura con modelos Pydantic: si falta un campo esperado o cambia el tipo, el ingestor falla con error explícito (la fuente cambió su formato), nunca escribe una tabla curada a medias.
 
@@ -57,7 +58,10 @@ lfdata backfill biwenger --competition la-liga --from-season 2022 # históricas,
 3. `sources.http` + tests (falsificando el transporte, sin red).
 4. Cliente Biwenger contra fixtures reales guardadas del experimento; después, ingesta real de la temporada actual.
 5. Backend S3 y primera escritura al bucket real.
-6. Backfill de 5 temporadas de La Liga y Segunda (lento a propósito: ~630 jugadores × temporada, 2 s entre peticiones ≈ 20 min por temporada y competición).
+6. Backfill de 5 temporadas de La Liga y Segunda. Dos vías complementarias (decidido el 2026-07-10):
+   - **Detalle por jugador actual** (~630 × temporada): rawStats completo (minutos, nota, precios), pero solo cubre a los jugadores que siguen en la competición (los que se fueron devuelven 404 → sesgo de supervivencia).
+   - **Rounds históricos** (38 jornadas × 5 sistemas ≈ 190 peticiones por temporada): puntos por sistema de *todos* los jugadores de cada jornada pasada, incluidos los que se fueron, a una tabla curada propia (sin minutos ni nota; el eventing de esos jugadores lo aporta el backfill de SofaScore del paso 3).
+   El run es reanudable: una temporada pasada es inmutable, así que la marca de reanudación es la mera existencia del raw por jugador-temporada (patrón `--since-days` de Transfermarkt, con antigüedad infinita). Se ejecuta por ScrapeOps dentro del mes de pago puntual, sincronizado con el backfill de SofaScore (ADR 0004).
 
 ## Hecho cuando
 

@@ -20,10 +20,11 @@ WAIT_SECONDS = 2.0
 PLAYER_FIELDS = "*,reports(points,home,status,match(*,round),rawStats),prices,seasons"
 # Biwenger corta con 429 a las ~200 peticiones por ventana e IP, aunque se
 # espere 2 s entre ellas (comprobado ingiriendo la-liga 2025: bloqueo limpio en
-# el jugador ~200). Se enruta por ScrapeOps para rotar IPs y completar la
-# temporada en un run. El proxy solo se activa si además hay LFDATA_SCRAPEOPS_KEY
-# en el entorno; sin clave, el transporte va directo (ver #28).
-PROXY_ENABLED = True
+# el jugador ~200). Se permite desbordar a ScrapeOps (rota IPs) para pasar de las
+# ~200 en un run, pero solo tras confirmar el bloqueo: hasta entonces va directo
+# (gratis). El desbordamiento requiere LFDATA_SCRAPEOPS_KEY; sin clave, directo
+# con reintentos normales (ADR 0004).
+PROXY_OVERFLOW = True
 
 
 class SourceFormatError(Exception):

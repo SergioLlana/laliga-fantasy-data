@@ -8,7 +8,7 @@ from datetime import date
 
 import pandas as pd
 
-from lfdata.sources.biwenger.client import PROXY_ENABLED, WAIT_SECONDS, BiwengerClient
+from lfdata.sources.biwenger.client import PROXY_OVERFLOW, WAIT_SECONDS, BiwengerClient
 from lfdata.sources.biwenger.models import Player, PlayerDetail
 from lfdata.sources.http import HttpTransport, SourceHTTPError, scrapeops_proxy_from_env
 from lfdata.sources.ingestion import IngestResult, PlayerFailure
@@ -76,7 +76,7 @@ def ingest_squad(
     """
     transport = transport or HttpTransport(
         wait_seconds=WAIT_SECONDS,
-        proxy=scrapeops_proxy_from_env(enabled=PROXY_ENABLED),
+        overflow_proxy=scrapeops_proxy_from_env(enabled=PROXY_OVERFLOW),
     )
     client = BiwengerClient(transport, storage.raw)
     data = client.fetch_competition_data(competition).data
@@ -196,7 +196,7 @@ def ingest_reports(
     """
     transport = transport or HttpTransport(
         wait_seconds=WAIT_SECONDS,
-        proxy=scrapeops_proxy_from_env(enabled=PROXY_ENABLED),
+        overflow_proxy=scrapeops_proxy_from_env(enabled=PROXY_OVERFLOW),
     )
     client = BiwengerClient(transport, storage.raw)
     data = client.fetch_competition_data(competition).data

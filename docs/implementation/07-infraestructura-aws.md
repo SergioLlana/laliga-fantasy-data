@@ -27,7 +27,7 @@ Coste esperado en reposo: <5 €/mes (S3 céntimos, Fargate ~15 min/día, Lambda
 
 Un solo comando, `lfdata daily`, ejecuta en orden dentro de la tarea Fargate:
 
-1. `ingest biwenger` (La Liga y Segunda, día actual: plantillas, precios, reports de la última jornada).
+1. `ingest biwenger` (**solo La Liga**; Segunda es histórico: se re-ingiere una vez al cierre de temporada para los baselines de ascendidos, y bajo demanda si alguien sube en invierno). El diario es ligero: 1 petición de plantilla (precios, estados y puntos acumulados de los 634). Tras jornada, refresh por deltas: 1 petición de `rounds` da la lista exacta de quienes puntuaron (~280) y solo esos descargan su detalle — directo, con desbordamiento a proxy si salta la cuota (ADR 0004).
 2. `ingest sofascore` (partidos nuevos de las ligas cubiertas + bajo demanda de jugadores nuevos detectados).
 3. `ingest transfermarkt` (semanal: valores y traspasos; no cambia a diario).
 4. `map --check` (falla el trabajo si aparecen filas sin mapping → llegan a revisión manual).
@@ -46,7 +46,7 @@ Sin orquestador externo (Airflow, Step Functions): es una secuencia lineal donde
 ## Orden de trabajo
 
 1. Terraform del núcleo: bucket de datos, IAM, ECR.
-2. Contenedor del pipeline + tarea manual en Fargate (backfills reales ya se lanzan así).
+2. Contenedor del pipeline + tarea manual en Fargate (backfills reales ya se lanzan así). Incluye una **tarea de humo** previa a automatizar: unas decenas de peticiones directas a Biwenger y SofaScore desde Fargate para validar que las IPs de datacenter de AWS no están vetadas (si lo están, el desbordamiento a proxy cubre el hueco con coste acotado). Cada tarea Fargate estrena IP pública, lo que además resetea la cuota por ventana de Biwenger en cada run.
 3. EventBridge diario + notificación de fallos.
 4. Lambda web + CloudFront + estáticos.
 5. Dominio y certificado si se quiere URL propia (decisión pendiente, no bloquea).

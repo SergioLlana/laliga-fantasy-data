@@ -123,7 +123,12 @@ def test_persistent_timeout_becomes_504_not_a_crash() -> None:
         transport.get("https://x/a")
 
 
-# --- Modo proxy (ScrapeOps) --------------------------------------------------
+# --- Desbordamiento a proxy (ScrapeOps, ADR 0004) ----------------------------
+
+
+def _wrapped(url: str, params: str) -> FakeCall:
+    """La llamada tal como la ve la sesión cuando va por ScrapeOps."""
+    return FakeCall(SCRAPEOPS_ENDPOINT, {"api_key": "secret-key", "url": f"{url}?{params}"})
 
 
 def test_without_proxy_requests_target_directly() -> None:
@@ -134,20 +139,114 @@ def test_without_proxy_requests_target_directly() -> None:
     assert session.calls == [FakeCall("https://sofascore/api", {"q": "fores"})]
 
 
-def test_with_proxy_routes_through_scrapeops_with_target_url() -> None:
+def test_starts_direct_even_when_overflow_available() -> None:
+    # El proxy es desbordamiento: mientras no haya bloqueo, todo va directo
+    # (gratis), aunque haya clave y la fuente lo permita.
     clock = FakeClock()
     session = FakeSession([FakeResponse(200, b"body")])
-    proxy = ScrapeOpsProxy("secret-key")
     transport = HttpTransport(
-        session=session, proxy=proxy, sleep=clock.sleep, clock=clock, wait_seconds=0.0
+        session=session,
+        overflow_proxy=ScrapeOpsProxy("secret-key"),
+        sleep=clock.sleep,
+        clock=clock,
+        wait_seconds=0.0,
+    )
+    assert transport.get("https://sofascore/api", params={"q": "fores"}) == b"body"
+    assert session.calls == [FakeCall("https://sofascore/api", {"q": "fores"})]
+
+
+def test_switches_to_proxy_on_persistent_block() -> None:
+    # Un 429 que persiste tras el primer reintento directo confirma el bloqueo:
+    # se conmuta y se reintenta por proxy dentro del mismo run (no se aborta ni
+    # se salta el jugador). El primer reintento gasta un solo backoff (5 s), no
+    # los 5-10-20 s completos.
+    clock = FakeClock()
+    session = FakeSession([FakeResponse(429), FakeResponse(429), FakeResponse(200, b"body")])
+    transport = HttpTransport(
+        session=session,
+        overflow_proxy=ScrapeOpsProxy("secret-key"),
+        sleep=clock.sleep,
+        clock=clock,
+        wait_seconds=0.0,
+        retry_wait_seconds=5.0,
     )
     assert transport.get("https://sofascore/api", params={"q": "fores"}) == b"body"
     assert session.calls == [
-        FakeCall(
-            SCRAPEOPS_ENDPOINT,
-            {"api_key": "secret-key", "url": "https://sofascore/api?q=fores"},
-        )
+        FakeCall("https://sofascore/api", {"q": "fores"}),
+        FakeCall("https://sofascore/api", {"q": "fores"}),
+        _wrapped("https://sofascore/api", "q=fores"),
     ]
+    assert clock.sleeps == [5.0]
+
+
+def test_first_block_is_a_direct_retry_before_switching() -> None:
+    # Un 429 aislado no dispara el proxy: se reintenta directo por si es un blip.
+    clock = FakeClock()
+    session = FakeSession([FakeResponse(429), FakeResponse(200, b"body")])
+    transport = HttpTransport(
+        session=session,
+        overflow_proxy=ScrapeOpsProxy("secret-key"),
+        sleep=clock.sleep,
+        clock=clock,
+        wait_seconds=0.0,
+        retry_wait_seconds=5.0,
+    )
+    assert transport.get("https://sofascore/api") == b"body"
+    assert session.calls == [
+        FakeCall("https://sofascore/api", None),
+        FakeCall("https://sofascore/api", None),
+    ]
+
+
+def test_stays_on_proxy_after_switching() -> None:
+    # Tras conmutar, las peticiones siguientes de esa fuente van directas por
+    # proxy: no se re-prueba la vía directa en el mismo run.
+    clock = FakeClock()
+    session = FakeSession(
+        [FakeResponse(429), FakeResponse(429), FakeResponse(200, b"one"), FakeResponse(200, b"two")]
+    )
+    transport = HttpTransport(
+        session=session,
+        overflow_proxy=ScrapeOpsProxy("secret-key"),
+        sleep=clock.sleep,
+        clock=clock,
+        wait_seconds=0.0,
+    )
+    assert transport.get("https://sofascore/a") == b"one"
+    assert transport.get("https://sofascore/b") == b"two"
+    # La segunda petición sale ya por proxy en su primer intento.
+    assert session.calls[-1] == FakeCall(
+        SCRAPEOPS_ENDPOINT, {"api_key": "secret-key", "url": "https://sofascore/b"}
+    )
+
+
+def test_403_also_triggers_overflow() -> None:
+    # 403 (reto de Cloudflare / IP vetada) también gatilla el desbordamiento.
+    clock = FakeClock()
+    session = FakeSession([FakeResponse(403), FakeResponse(403), FakeResponse(200, b"body")])
+    transport = HttpTransport(
+        session=session,
+        overflow_proxy=ScrapeOpsProxy("secret-key"),
+        sleep=clock.sleep,
+        clock=clock,
+        wait_seconds=0.0,
+    )
+    assert transport.get("https://sofascore/api") == b"body"
+    assert session.calls[-1] == FakeCall(
+        SCRAPEOPS_ENDPOINT, {"api_key": "secret-key", "url": "https://sofascore/api"}
+    )
+
+
+def test_without_key_429_retries_directly_and_never_proxies() -> None:
+    # Sin LFDATA_SCRAPEOPS_KEY (overflow_proxy None) el comportamiento es el de
+    # siempre: reintentos directos con backoff creciente, sin conmutar nunca.
+    transport, clock = make_transport(
+        [FakeResponse(429), FakeResponse(429), FakeResponse(200, b"al fin")],
+        wait_seconds=0.0,
+        retry_wait_seconds=5.0,
+    )
+    assert transport.get("https://x/a") == b"al fin"
+    assert clock.sleeps == [5.0, 10.0]
 
 
 def test_403_without_proxy_suggests_enabling_it() -> None:
@@ -156,11 +255,16 @@ def test_403_without_proxy_suggests_enabling_it() -> None:
         transport.get("https://sofascore/api")
 
 
-def test_403_with_proxy_active_does_not_suggest_proxy() -> None:
+def test_403_after_switch_does_not_suggest_proxy() -> None:
+    # Ya conmutados a proxy, un 403 no sugiere activar el proxy (ya está activo).
     clock = FakeClock()
-    session = FakeSession([FakeResponse(403)])
+    session = FakeSession([FakeResponse(429), FakeResponse(429), FakeResponse(403)])
     transport = HttpTransport(
-        session=session, proxy=ScrapeOpsProxy("k"), sleep=clock.sleep, clock=clock, wait_seconds=0.0
+        session=session,
+        overflow_proxy=ScrapeOpsProxy("k"),
+        sleep=clock.sleep,
+        clock=clock,
+        wait_seconds=0.0,
     )
     with pytest.raises(SourceHTTPError) as excinfo:
         transport.get("https://sofascore/api")

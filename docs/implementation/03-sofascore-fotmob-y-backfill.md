@@ -10,9 +10,9 @@
 
 ## Uso de ScrapeOps (aclaración operativa)
 
-- Por defecto **apagado**: el volumen normal (actualización diaria) va directo con `curl-cffi` + esperas de 3-5 s, que el experimento demostró suficiente.
-- Se enciende por fuente (`proxy=true` en la config de la fuente) en dos supuestos: SofaScore empieza a devolver 403/429 sostenidos, o hay que acelerar un backfill grande paralelizando.
-- El plan gratuito (~1.000 créditos/mes) sirve para validar la integración y absorber bloqueos puntuales; si se convierte en necesidad diaria, pasar a plan de pago es cambiar una variable de entorno.
+- Por defecto **apagado**: el volumen normal (actualización diaria) va directo con `curl-cffi` + esperas de 3-5 s, que el experimento demostró suficiente. El proxy actúa como desbordamiento automático ante bloqueo persistente (ADR 0004).
+- El plan gratuito (~1.000 créditos/mes) sirve para validar la integración y absorber bloqueos puntuales del incremental.
+- **El backfill masivo se lanza dentro de un mes de plan de pago puntual, sincronizado con el resto del backfill de Biwenger** (decidido el 2026-07-10): se contrata cuando este paso esté implementado y ambos backfills corren en paralelo por proxy ese mismo mes (~23.000 créditos SofaScore + ~4.500 Biwenger caben en un plan de ~100k). La paralelización solo se hace en modo proxy (rotación de IPs); en directo aceleraría el bloqueo.
 
 ## Componentes
 
