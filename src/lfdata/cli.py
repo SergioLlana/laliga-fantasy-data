@@ -4,6 +4,7 @@ Los subcomandos (ingest, backfill...) se registran aquí a medida que existen.
 """
 
 import argparse
+import logging
 import os
 
 from lfdata import __version__
@@ -100,17 +101,27 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _report_ingest(result, competition: str, data: str) -> int:
+    """Imprime filas por tabla y el resumen de fallos; 1 si hubo alguno."""
+    for table, count in result.rows.items():
+        print(f"{table}: {count} filas ({competition}) -> {data}")
+    if not result.failures:
+        return 0
+    print(f"\n{len(result.failures)} jugadores fallaron y se saltaron:")
+    for failure in result.failures:
+        print(f"  - {failure}")
+    return 1
+
+
 def _cmd_ingest_biwenger(args: argparse.Namespace) -> int:
     from lfdata.sources.biwenger import ingest_reports, ingest_squad
     from lfdata.storage import Storage
 
     storage = Storage(args.data)
-    rows = ingest_squad(storage, args.competition)
+    result = ingest_squad(storage, args.competition)
     if args.season:
-        rows |= ingest_reports(storage, args.competition, args.season)
-    for table, count in rows.items():
-        print(f"{table}: {count} filas ({args.competition}) -> {args.data}")
-    return 0
+        result |= ingest_reports(storage, args.competition, args.season)
+    return _report_ingest(result, args.competition, args.data)
 
 
 def _cmd_ingest_transfermarkt(args: argparse.Namespace) -> int:
@@ -118,16 +129,14 @@ def _cmd_ingest_transfermarkt(args: argparse.Namespace) -> int:
     from lfdata.storage import Storage
 
     storage = Storage(args.data)
-    rows = ingest_squads(
+    result = ingest_squads(
         storage,
         args.competition,
         season=args.season,
         max_clubs=args.max_clubs,
         since_days=args.since_days,
     )
-    for table, count in rows.items():
-        print(f"{table}: {count} filas ({args.competition}) -> {args.data}")
-    return 0
+    return _report_ingest(result, args.competition, args.data)
 
 
 def _cmd_map(args: argparse.Namespace) -> int:
@@ -161,6 +170,10 @@ def _cmd_map(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command is None:

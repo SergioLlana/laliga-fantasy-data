@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from lfdata.cli import main
+from lfdata.sources.http import SourceHTTPError
 from lfdata.sources.transfermarkt import SourceFormatError, TransfermarktClient, ingest_squads
 from lfdata.sources.transfermarkt.parse import (
     availability_rows,
@@ -249,9 +250,10 @@ def test_raw_written_before_interpreting_html(storage: Storage, tmp_path: Path) 
 
 def test_ingest_squads_writes_curated_tables(storage: Storage, tmp_path: Path) -> None:
     transport = RoutingTransport(default_routes())
-    rows = ingest_squads(storage, "la-liga", season=2025, transport=transport, max_clubs=1)
+    result = ingest_squads(storage, "la-liga", season=2025, transport=transport, max_clubs=1)
 
     # 1 club (Real Madrid, primero de la competición) con la plantilla-fixture de 39.
+    rows = result.rows
     assert rows["transfermarkt_players"] == 39
     assert rows["market_values_tm"] == 39 * 15
     assert rows["transfers"] == 39 * 11
@@ -324,9 +326,9 @@ def test_ingest_is_idempotent(storage: Storage) -> None:
     assert second == first  # correr al mismo jugador dos veces no duplica
 
     players = storage.curated.read_table("transfermarkt_players")
-    assert len(players) == first["transfermarkt_players"]
+    assert len(players) == first.rows["transfermarkt_players"]
     values = storage.curated.read_table("market_values_tm")
-    assert len(values) == first["market_values_tm"]
+    assert len(values) == first.rows["market_values_tm"]
 
 
 def test_ingest_since_days_skips_recently_scraped(storage: Storage) -> None:
@@ -336,7 +338,7 @@ def test_ingest_since_days_skips_recently_scraped(storage: Storage) -> None:
     before = storage.curated.read_table("transfermarkt_players")
 
     # Todos se descargaron hoy: con una ventana amplia, se saltan todos.
-    totals = ingest_squads(
+    result = ingest_squads(
         storage,
         "la-liga",
         season=2025,
@@ -344,9 +346,105 @@ def test_ingest_since_days_skips_recently_scraped(storage: Storage) -> None:
         max_clubs=1,
         since_days=30,
     )
-    assert totals == dict.fromkeys(totals, 0)
+    assert result.rows == dict.fromkeys(result.rows, 0)
     after = storage.curated.read_table("transfermarkt_players")
     assert len(after) == len(before)  # la partición queda intacta
+
+
+# --- resiliencia: 404 por jugador y refresh que retira a quien salió (#36) ---
+
+
+class Fail404OnProfileTransport(RoutingTransport):
+    """Como RoutingTransport, pero devuelve 404 en el perfil del slug indicado."""
+
+    def __init__(self, routes: dict[str, bytes], fail_slug: str) -> None:
+        super().__init__(routes)
+        self.fail_slug = fail_slug
+
+    def get(self, url: str, params=None) -> bytes:
+        if f"{self.fail_slug}/profil/spieler" in url:
+            raise SourceHTTPError(url, 404)
+        return super().get(url, params)
+
+
+def test_ingest_404_skips_player_and_curates_rest(storage: Storage) -> None:
+    # El primer jugador de la plantilla-fixture es el portero Aarón Escandell.
+    transport = Fail404OnProfileTransport(default_routes(), "aaron-escandell")
+    result = ingest_squads(storage, "la-liga", season=2025, transport=transport, max_clubs=1)
+
+    assert len(result.failures) == 1
+    assert result.failures[0].player == "aaron-escandell"
+    assert result.failures[0].status == 404
+    players = storage.curated.read_table("transfermarkt_players")
+    assert len(players) == 38  # 39 menos el que dio 404
+    assert "aaron-escandell" not in set(players["slug"])
+
+
+def test_full_refresh_retires_departed_player(storage: Storage) -> None:
+    # Siembra la partición y le añade un jugador fantasma que ya no juega.
+    ingest_squads(
+        storage, "la-liga", season=2025, transport=RoutingTransport(default_routes()), max_clubs=1
+    )
+    partition = {"competition": "la-liga"}
+    seeded = storage.curated.read_table("transfermarkt_players")
+    phantom = seeded.iloc[[0]].copy()
+    phantom["id"] = 999999
+    phantom["slug"] = "fantasma"
+    storage.curated.upsert_table("transfermarkt_players", phantom, key="id", partition=partition)
+    assert 999999 in set(storage.curated.read_table("transfermarkt_players")["id"])
+
+    # Refresh completo (sin max_clubs): recorre la competición y retira al ausente.
+    ingest_squads(storage, "la-liga", season=2025, transport=RoutingTransport(default_routes()))
+    players = storage.curated.read_table("transfermarkt_players")
+    assert 999999 not in set(players["id"])  # el fantasma salió
+    assert len(players) == 39  # solo los vistos en plantilla
+
+
+def test_partial_run_never_retires(storage: Storage) -> None:
+    ingest_squads(
+        storage, "la-liga", season=2025, transport=RoutingTransport(default_routes()), max_clubs=1
+    )
+    partition = {"competition": "la-liga"}
+    seeded = storage.curated.read_table("transfermarkt_players")
+    phantom = seeded.iloc[[0]].copy()
+    phantom["id"] = 999999
+    storage.curated.upsert_table("transfermarkt_players", phantom, key="id", partition=partition)
+
+    # Un run con max_clubs no es refresh completo: no retira a nadie visto ni al fantasma.
+    ingest_squads(
+        storage, "la-liga", season=2025, transport=RoutingTransport(default_routes()), max_clubs=1
+    )
+    assert 999999 in set(storage.curated.read_table("transfermarkt_players")["id"])
+
+
+def test_cli_ingest_404_exit_code(tmp_path: Path, monkeypatch, capsys) -> None:
+    routes = default_routes()
+
+    def fake_get(self, url, params=None):
+        if "aaron-escandell/profil/spieler" in url:
+            raise SourceHTTPError(url, 404)
+        for needle, payload in routes.items():
+            if needle in url:
+                return payload
+        raise AssertionError(f"URL sin fixture: {url}")
+
+    monkeypatch.setattr("lfdata.sources.http.HttpTransport.get", fake_get)
+    exit_code = main(
+        [
+            "ingest",
+            "transfermarkt",
+            "--competition",
+            "la-liga",
+            "--max-clubs",
+            "1",
+            "--data",
+            f"file://{tmp_path}",
+        ]
+    )
+    assert exit_code == 1
+    out = capsys.readouterr().out
+    assert "1 jugadores fallaron" in out
+    assert "aaron-escandell" in out
 
 
 def test_cli_ingest_end_to_end(tmp_path: Path, monkeypatch, capsys) -> None:
