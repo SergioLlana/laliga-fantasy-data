@@ -37,6 +37,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Temporada (p. ej. 2026). Si se indica, añade fantasy_points y biwenger_prices",
     )
     biwenger.add_argument(
+        "--delta",
+        action="store_true",
+        help=(
+            "Refresh por deltas tras jornada: en vez de recorrer la plantilla entera, "
+            "refresca solo a quienes puntuaron en las jornadas nuevas (requiere --season)"
+        ),
+    )
+    biwenger.add_argument(
         "--data",
         default=os.environ.get("LFDATA_DATA", DEFAULT_DATA_URI),
         help=f"URI base del almacenamiento (por defecto {DEFAULT_DATA_URI} o $LFDATA_DATA)",
@@ -129,9 +137,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _report_ingest(result, competition: str, data: str) -> int:
-    """Imprime filas por tabla, anomalías y el resumen de fallos; 1 si hubo alguno."""
+    """Imprime filas por tabla, métricas, anomalías y fallos; 1 si hubo alguno."""
     for table, count in result.rows.items():
         print(f"{table}: {count} filas ({competition}) -> {data}")
+    for name, count in result.stats.items():
+        print(f"{name}: {count}")
     for reason, count in result.anomalies.items():
         print(f"anomalía: {count} {reason}")
     if not result.failures:
@@ -143,13 +153,18 @@ def _report_ingest(result, competition: str, data: str) -> int:
 
 
 def _cmd_ingest_biwenger(args: argparse.Namespace) -> int:
-    from lfdata.sources.biwenger import ingest_reports, ingest_squad
+    from lfdata.sources.biwenger import ingest_reports, ingest_reports_delta, ingest_squad
     from lfdata.storage import Storage
+
+    if args.delta and not args.season:
+        print("--delta requiere --season")
+        return 2
 
     storage = Storage(args.data)
     result = ingest_squad(storage, args.competition)
     if args.season:
-        result |= ingest_reports(storage, args.competition, args.season)
+        reports = ingest_reports_delta if args.delta else ingest_reports
+        result |= reports(storage, args.competition, args.season)
     return _report_ingest(result, args.competition, args.data)
 
 

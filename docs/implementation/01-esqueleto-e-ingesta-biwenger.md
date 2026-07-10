@@ -47,8 +47,11 @@ Nota: estas tablas llevan aún IDs de Biwenger. El ID canónico llega en el paso
 ### CLI
 
 ```
-lfdata ingest biwenger --competition la-liga --season 2026        # temporada actual
+lfdata ingest biwenger --competition la-liga --season 2026        # temporada actual (recorrido completo)
 lfdata ingest biwenger --competition segunda-division --season 2026
+# Refresh por deltas tras jornada: 1 petición de rounds lista quiénes puntuaron
+# y solo esos refrescan su detalle, en vez de los 634 de la plantilla (trabajo diario).
+lfdata ingest biwenger --competition la-liga --season 2026 --delta
 lfdata backfill biwenger --competition la-liga --from-season 2022 # históricas, con espera larga
 # Puntos por jornada de todos los jugadores (histórico sin sesgo de supervivencia).
 # Descubre las jornadas de la temporada solo; --resume salta las ya curadas.

@@ -27,7 +27,7 @@ Coste esperado en reposo: <5 €/mes (S3 céntimos, Fargate ~15 min/día, Lambda
 
 Un solo comando, `lfdata daily`, ejecuta en orden dentro de la tarea Fargate:
 
-1. `ingest biwenger` (**solo La Liga**; Segunda es histórico: se re-ingiere una vez al cierre de temporada para los baselines de ascendidos, y bajo demanda si alguien sube en invierno). El diario es ligero: 1 petición de plantilla (precios, estados y puntos acumulados de los 634). Tras jornada, refresh por deltas: 1 petición de `rounds` da la lista exacta de quienes puntuaron (~280) y solo esos descargan su detalle — directo, con desbordamiento a proxy si salta la cuota (ADR 0004).
+1. `ingest biwenger --delta` (**solo La Liga**; Segunda es histórico: se re-ingiere una vez al cierre de temporada para los baselines de ascendidos, y bajo demanda si alguien sube en invierno). El diario es ligero: 1 petición de plantilla (precios, estados y puntos acumulados de los 634). Tras jornada, el refresh por deltas (`--delta`) detecta las jornadas terminadas que aún no están en `fantasy_points` desde el catálogo `season.rounds` que la plantilla ya trae, pide cada una vía `rounds` (1 petición) para la lista exacta de quienes puntuaron (~280) y solo esos descargan su detalle — directo, con desbordamiento a proxy si salta la cuota (ADR 0004). Sin jornada nueva, no baja ningún detalle.
 2. `ingest sofascore` (partidos nuevos de las ligas cubiertas + bajo demanda de jugadores nuevos detectados).
 3. `ingest transfermarkt` (semanal: valores y traspasos; no cambia a diario).
 4. `map --check` (falla el trabajo si aparecen filas sin mapping → llegan a revisión manual).

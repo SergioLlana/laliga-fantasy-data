@@ -173,38 +173,32 @@ def _prices_frame(rows: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["player_id", "date", "price"])
 
 
-def ingest_reports(
+def _refresh_players(
+    client: BiwengerClient,
     storage: Storage,
     competition: str,
     season: str,
+    players: list[Player],
     *,
-    transport: HttpTransport | None = None,
-    batch_size: int = REPORTS_BATCH_SIZE,
+    batch_size: int,
 ) -> IngestResult:
-    """Publica fantasy_points y biwenger_prices de una competición y temporada.
+    """Descarga el detalle de ``players`` y vuelca fantasy_points/prices/birthday.
 
-    Recorre todos los jugadores de la plantilla y descarga su detalle. Las filas
-    se vuelcan por lotes con ``upsert_table`` (clave ``player_id``) durante el
-    recorrido, de modo que un fallo a mitad conserva en curated todo lo ya
-    descargado y reejecutar no duplica. Un jugador que la fuente ya no sirve (404)
-    se registra como fallo y se salta sin abortar el run. Devuelve las filas
-    escritas por tabla y los jugadores fallidos.
+    El núcleo compartido por el recorrido completo (:func:`ingest_reports`) y el
+    refresh por deltas (:func:`ingest_reports_delta`): la única diferencia entre
+    ambos es qué jugadores llegan aquí. Vuelca por lotes con ``upsert_table``
+    (clave ``player_id``) durante el recorrido, de modo que un fallo a mitad
+    conserva en curated todo lo ya descargado y reejecutar no duplica. Un jugador
+    que la fuente ya no sirve (404) se registra como fallo y se salta sin abortar.
 
     El detalle trae la fecha de nacimiento (``birthday``), que la plantilla no
     publica: se refresca en ``biwenger_players`` (upsert por ``id``, misma
     partición de competición) para endurecer el matching de identidad (#37).
     """
-    transport = transport or HttpTransport(
-        wait_seconds=WAIT_SECONDS,
-        overflow_proxy=scrapeops_proxy_from_env(enabled=PROXY_OVERFLOW),
-    )
-    client = BiwengerClient(transport, storage.raw)
-    data = client.fetch_competition_data(competition).data
-
     partition = {"competition": competition, "season": season}
     result = IngestResult(rows={"fantasy_points": 0, "biwenger_prices": 0})
     points_without_stats = 0
-    total = len(data.players)
+    total = len(players)
     batch_points: list[dict] = []
     batch_prices: list[dict] = []
     batch_players: list[Player] = []
@@ -233,7 +227,7 @@ def ingest_reports(
         batch_prices.clear()
         batch_players.clear()
 
-    for index, player in enumerate(data.players.values(), start=1):
+    for index, player in enumerate(players, start=1):
         try:
             detail = client.fetch_player_reports(competition, player.slug, season).data
         except SourceHTTPError as error:
@@ -269,7 +263,33 @@ def ingest_reports(
 
     if points_without_stats:
         result.anomalies[POINTS_WITHOUT_STATS] = points_without_stats
+    return result
 
+
+def ingest_reports(
+    storage: Storage,
+    competition: str,
+    season: str,
+    *,
+    transport: HttpTransport | None = None,
+    batch_size: int = REPORTS_BATCH_SIZE,
+) -> IngestResult:
+    """Publica fantasy_points y biwenger_prices recorriendo la plantilla entera.
+
+    Descarga el detalle de los ~634 jugadores de la plantilla. Es el recorrido
+    completo de una temporada (bootstrap y backfill); para el mantenimiento
+    diario tras jornada, :func:`ingest_reports_delta` refresca solo a quienes
+    puntuaron. Devuelve las filas escritas por tabla y los jugadores fallidos.
+    """
+    transport = transport or HttpTransport(
+        wait_seconds=WAIT_SECONDS,
+        overflow_proxy=scrapeops_proxy_from_env(enabled=PROXY_OVERFLOW),
+    )
+    client = BiwengerClient(transport, storage.raw)
+    data = client.fetch_competition_data(competition).data
+    result = _refresh_players(
+        client, storage, competition, season, list(data.players.values()), batch_size=batch_size
+    )
     logger.info(
         "biwenger reports %s %s: %d filas de puntos, %d de precios, %d fallidos, "
         "%d reports con puntos sin rawStats",
@@ -278,7 +298,108 @@ def ingest_reports(
         result.rows["fantasy_points"],
         result.rows["biwenger_prices"],
         len(result.failures),
-        points_without_stats,
+        result.anomalies.get(POINTS_WITHOUT_STATS, 0),
+    )
+    return result
+
+
+# Métricas del refresh por deltas para el resumen del run.
+REFRESHED = "jugadores refrescados"
+SKIPPED = "jugadores saltados"
+
+
+def _scoring_player_ids(round_data: RoundData) -> set[int]:
+    """Ids de todos los jugadores que puntuaron en la jornada (ambos equipos)."""
+    return {
+        report.player.id
+        for game in round_data.games
+        for team in (game.home, game.away)
+        for report in team.reports
+    }
+
+
+def ingest_reports_delta(
+    storage: Storage,
+    competition: str,
+    season: str,
+    *,
+    transport: HttpTransport | None = None,
+    batch_size: int = REPORTS_BATCH_SIZE,
+) -> IngestResult:
+    """Refresh por deltas tras jornada: solo refresca a quienes puntuaron.
+
+    En lugar de recorrer los ~634 de la plantilla, mira el catálogo de jornadas
+    que la plantilla ya trae (``season.rounds``), detecta las jornadas terminadas
+    que aún no están en ``fantasy_points`` y, por cada una, pide la jornada vía
+    rounds (1 petición) para obtener la lista exacta de quienes puntuaron (~280).
+    Solo esos jugadores de la plantilla refrescan su detalle (reports, precios,
+    birthday). Como una jornada solo genera fila en ``fantasy_points`` para quien
+    puntuó, el resultado es idéntico al del recorrido completo, con una fracción
+    de las peticiones.
+
+    Sin jornada nueva desde el último run, no pide ningún detalle. Idempotente:
+    ``fantasy_points`` es la marca de qué jornadas ya se procesaron, así que
+    reejecutar no vuelve a pedir nada. Devuelve las filas escritas y, en
+    ``stats``, jugadores refrescados vs. saltados.
+    """
+    transport = transport or HttpTransport(
+        wait_seconds=WAIT_SECONDS,
+        overflow_proxy=scrapeops_proxy_from_env(enabled=PROXY_OVERFLOW),
+    )
+    client = BiwengerClient(transport, storage.raw)
+    data = client.fetch_competition_data(competition).data
+    squad = {player.id: player for player in data.players.values()}
+
+    partition = {"competition": competition, "season": season}
+    processed = {
+        int(round_id)
+        for round_id in storage.curated.distinct_values(
+            "fantasy_points", "round_id", partition=partition
+        )
+    }
+    pending = [r for r in data.season.rounds if r.status == "finished" and r.id not in processed]
+
+    if not pending:
+        logger.info(
+            "biwenger delta %s %s: sin jornada nueva terminada; 0 detalles pedidos",
+            competition,
+            season,
+        )
+        result = IngestResult(rows={"fantasy_points": 0, "biwenger_prices": 0})
+        result.stats = {REFRESHED: 0, SKIPPED: len(squad)}
+        return result
+
+    scorer_ids: set[int] = set()
+    for round_meta in pending:
+        round_data = client.fetch_round(competition, round_meta.id, 1).data
+        scorer_ids |= _scoring_player_ids(round_data)
+
+    to_refresh = [squad[player_id] for player_id in scorer_ids if player_id in squad]
+    outside_squad = len(scorer_ids) - len(to_refresh)
+    logger.info(
+        "biwenger delta %s %s: %d jornada(s) nueva(s) %s, %d puntuaron (%d fuera de plantilla), "
+        "refrescando %d",
+        competition,
+        season,
+        len(pending),
+        [r.id for r in pending],
+        len(scorer_ids),
+        outside_squad,
+        len(to_refresh),
+    )
+
+    result = _refresh_players(
+        client, storage, competition, season, to_refresh, batch_size=batch_size
+    )
+    result.stats = {REFRESHED: len(to_refresh), SKIPPED: len(squad) - len(to_refresh)}
+    logger.info(
+        "biwenger delta %s %s: %d refrescados, %d saltados, %d filas de puntos, %d fallidos",
+        competition,
+        season,
+        result.stats[REFRESHED],
+        result.stats[SKIPPED],
+        result.rows["fantasy_points"],
+        len(result.failures),
     )
     return result
 
