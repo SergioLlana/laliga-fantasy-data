@@ -1,12 +1,14 @@
 """Capas de almacenamiento: cruda (raw/) y curada (curated/), ADR 0003.
 
 El destino es una URI base: ``file://./data`` en desarrollo,
-``s3://...`` en producción (backend S3 pendiente, issue #5).
+``s3://lfdata-data-593760774245`` en producción. La elección es solo
+configuración (``--data`` o ``$LFDATA_DATA``); la misma ingesta escribe a un
+sitio u otro sin cambios de código.
 
 Las dos capas operan exclusivamente contra :class:`StorageBackend`, un
 protocolo de cuatro operaciones (``write_bytes``, ``read_bytes``, ``exists``,
-``list_keys``) que un backend S3 puede implementar tal cual. Ninguna store
-conoce la naturaleza de sistema de ficheros del backend local.
+``list_keys``). Hay dos implementaciones —:class:`LocalBackend` y
+:class:`S3Backend`— y ninguna store conoce cuál tiene debajo.
 """
 
 from __future__ import annotations
@@ -78,11 +80,73 @@ class LocalBackend:
         return sorted(p.relative_to(self.root).as_posix() for p in base.rglob("*") if p.is_file())
 
 
+class S3Backend:
+    """Guarda y lee bytes bajo un bucket S3 (y un prefijo opcional).
+
+    Una PUT de S3 es atómica por sí misma —un lector ve el objeto anterior o el
+    nuevo completo, nunca uno a medias—, así que :meth:`write_bytes` no necesita
+    el baile de fichero temporal del backend local.
+
+    Las credenciales y la región las resuelve boto3 por su cadena estándar
+    (perfil ``AWS_PROFILE``, variables de entorno, rol de la tarea...): este
+    backend nunca las codifica. En tests se le inyecta un cliente ya construido.
+    """
+
+    def __init__(self, bucket: str, prefix: str = "", *, client: object | None = None) -> None:
+        self._bucket = bucket
+        self._prefix = prefix.strip("/")
+        self._client = client
+
+    @property
+    def _s3(self) -> object:
+        if self._client is None:
+            import boto3
+
+            self._client = boto3.client("s3")
+        return self._client
+
+    def _object_key(self, key: str) -> str:
+        """Antepone el prefijo del bucket a la clave lógica de la store."""
+        return f"{self._prefix}/{key}" if self._prefix else key
+
+    def write_bytes(self, key: str, payload: bytes) -> None:
+        self._s3.put_object(Bucket=self._bucket, Key=self._object_key(key), Body=payload)
+
+    def read_bytes(self, key: str) -> bytes:
+        obj = self._s3.get_object(Bucket=self._bucket, Key=self._object_key(key))
+        return obj["Body"].read()
+
+    def exists(self, key: str) -> bool:
+        from botocore.exceptions import ClientError
+
+        try:
+            self._s3.head_object(Bucket=self._bucket, Key=self._object_key(key))
+        except ClientError as error:
+            if error.response["ResponseMetadata"]["HTTPStatusCode"] == 404:
+                return False
+            raise
+        return True
+
+    def list_keys(self, prefix: str) -> list[str]:
+        object_prefix = self._object_key(prefix)
+        strip = len(self._prefix) + 1 if self._prefix else 0
+        paginator = self._s3.get_paginator("list_objects_v2")
+        keys = [
+            item["Key"][strip:]
+            for page in paginator.paginate(Bucket=self._bucket, Prefix=object_prefix)
+            for item in page.get("Contents", [])
+        ]
+        return sorted(keys)
+
+
 def backend_from_uri(base_uri: str) -> StorageBackend:
     if base_uri.startswith("file://"):
         return LocalBackend(Path(base_uri.removeprefix("file://")))
     if base_uri.startswith("s3://"):
-        raise NotImplementedError("El backend S3 llega con el issue #5; usa file:// por ahora")
+        bucket, _, prefix = base_uri.removeprefix("s3://").partition("/")
+        if not bucket:
+            raise ValueError(f"URI S3 sin bucket: {base_uri!r}")
+        return S3Backend(bucket, prefix)
     raise ValueError(f"URI de almacenamiento no soportada: {base_uri!r}")
 
 
