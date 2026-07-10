@@ -38,3 +38,7 @@ uv run ruff format .       # formateo
 ```
 
 La documentación del proyecto vive en `docs/`: el plan general en `docs/plan.md`, los planes de implementación en `docs/implementation/` y las decisiones de arquitectura en `docs/adr/`. El lenguaje del dominio está en `CONTEXT.md`.
+
+## Infraestructura
+
+La infraestructura AWS (`eu-south-2`) se define con Terraform en `infra/` y se aplica a mano con credenciales de administrador. El núcleo incluye el bucket de datos, el usuario CLI de permisos mínimos, el rol del pipeline, el repositorio ECR y la alerta de presupuesto. Ver [`infra/README.md`](infra/README.md) para el procedimiento de arranque.
