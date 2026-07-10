@@ -287,6 +287,16 @@ def test_ingest_reports_fills_birth_date_on_players(storage: Storage) -> None:
     assert row["name"] == "alex-fores"  # el resto de la fila se conserva
 
 
+def test_birthday_zero_means_unknown_not_year_zero() -> None:
+    # Biwenger publica birthday 0 cuando no conoce la fecha (p. ej. anselmi):
+    # no es date(0, 0, 0), es ausencia. Antes reventaba la ingesta entera.
+    from lfdata.sources.biwenger.ingest import _birthday_to_iso
+
+    assert _birthday_to_iso(0) is None
+    assert _birthday_to_iso(None) is None
+    assert _birthday_to_iso(20010412) == "2001-04-12"
+
+
 # --- reports con puntos pero sin rawStats (#39) -----------------------------
 
 

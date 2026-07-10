@@ -105,9 +105,10 @@ def _birthday_to_iso(stamp: int | None) -> str | None:
     """Convierte el entero AAAAMMDD del detalle (20010412) en ISO (2001-04-12).
 
     Distinto del AAMMDD de los precios: la fecha de nacimiento trae el año con
-    cuatro cifras. Devuelve ``None`` si el detalle no la publica.
+    cuatro cifras. Devuelve ``None`` si el detalle no la publica: puede faltar
+    (``None``) o venir como ``0`` (Biwenger lo usa para "fecha desconocida").
     """
-    if stamp is None:
+    if not stamp:
         return None
     return date(stamp // 10000, stamp // 100 % 100, stamp % 100).isoformat()
 
