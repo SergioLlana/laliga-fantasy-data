@@ -45,6 +45,23 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     biwenger.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Salta a los jugadores que ya tienen su report en raw/ (reanudar un backfill "
+            "de temporada pasada inmutable sin re-descargar; requiere --season)"
+        ),
+    )
+    biwenger.add_argument(
+        "--since-days",
+        type=int,
+        default=None,
+        help=(
+            "Salta jugadores descargados en los últimos N días (reanudar el refresh de la "
+            "temporada actual; requiere --season)"
+        ),
+    )
+    biwenger.add_argument(
         "--data",
         default=os.environ.get("LFDATA_DATA", DEFAULT_DATA_URI),
         help=f"URI base del almacenamiento (por defecto {DEFAULT_DATA_URI} o $LFDATA_DATA)",
@@ -159,12 +176,23 @@ def _cmd_ingest_biwenger(args: argparse.Namespace) -> int:
     if args.delta and not args.season:
         print("--delta requiere --season")
         return 2
+    if args.delta and (args.resume or args.since_days is not None):
+        print("--resume y --since-days no aplican a --delta (ya es idempotente por jornada)")
+        return 2
 
     storage = Storage(args.data)
     result = ingest_squad(storage, args.competition)
     if args.season:
-        reports = ingest_reports_delta if args.delta else ingest_reports
-        result |= reports(storage, args.competition, args.season)
+        if args.delta:
+            result |= ingest_reports_delta(storage, args.competition, args.season)
+        else:
+            result |= ingest_reports(
+                storage,
+                args.competition,
+                args.season,
+                since_days=args.since_days,
+                resume=args.resume,
+            )
     return _report_ingest(result, args.competition, args.data)
 
 

@@ -16,6 +16,7 @@ from lfdata.sources.biwenger import (
     ingest_rounds,
     ingest_squad,
 )
+from lfdata.sources.biwenger.ingest import REFRESHED, SKIPPED
 from lfdata.sources.http import SourceHTTPError
 from lfdata.storage import Storage
 
@@ -445,6 +446,115 @@ def test_ingest_reports_incremental_preserves_progress_on_crash(storage: Storage
     # El primer jugador se volcó por lote antes de que el segundo reventara.
     assert len(storage.curated.read_table("fantasy_points")) == 3
     assert len(storage.curated.read_table("biwenger_prices")) == 4
+
+
+# --- reanudación del backfill: saltar lo ya descargado en raw/ (#53) ---------
+
+
+def _player_fetches(transport) -> list[str]:
+    return [u for u in transport.urls if "/players/" in u]
+
+
+def test_ingest_reports_resume_skips_players_in_raw(storage: Storage) -> None:
+    """Temporada pasada: relanzar con resume no vuelve a pedir a los ya bajados."""
+    squad = _competition_payload("alex-fores", "leo-messi")
+    ingest_reports(
+        storage, "la-liga", "2025", transport=RoutingTransport(squad, PLAYER_LA_LIGA.read_bytes())
+    )
+
+    resumed = RoutingTransport(squad, PLAYER_LA_LIGA.read_bytes())
+    result = ingest_reports(storage, "la-liga", "2025", transport=resumed, resume=True)
+
+    assert _player_fetches(resumed) == []  # 0 peticiones de detalle
+    assert result.stats == {REFRESHED: 0, SKIPPED: 2}
+
+
+def test_ingest_reports_since_days_skips_recently_scraped(storage: Storage) -> None:
+    """Temporada actual: --since-days salta a los descargados dentro de la ventana."""
+    squad = _competition_payload("alex-fores", "leo-messi")
+    ingest_reports(
+        storage, "la-liga", "2026", transport=RoutingTransport(squad, PLAYER_LA_LIGA.read_bytes())
+    )
+
+    resumed = RoutingTransport(squad, PLAYER_LA_LIGA.read_bytes())
+    result = ingest_reports(storage, "la-liga", "2026", transport=resumed, since_days=30)
+
+    assert _player_fetches(resumed) == []
+    assert result.stats == {REFRESHED: 0, SKIPPED: 2}
+
+
+def test_ingest_reports_interrupted_player_not_marked_complete(storage: Storage) -> None:
+    """Un 404 no escribe raw: al reanudar ese jugador se reintenta, no se salta."""
+    squad = _competition_payload("alex-fores", "baja")
+    first = Fail404OnPlayerTransport(squad, PLAYER_LA_LIGA.read_bytes(), "baja")
+    ingest_reports(storage, "la-liga", "2025", transport=first)
+
+    resumed = RoutingTransport(squad, PLAYER_LA_LIGA.read_bytes())
+    result = ingest_reports(storage, "la-liga", "2025", transport=resumed, resume=True)
+
+    # alex-fores tenía raw (se salta); baja no lo tuvo (se reintenta).
+    fetched = _player_fetches(resumed)
+    assert any(u.endswith("/baja") for u in fetched)
+    assert not any(u.endswith("/alex-fores") for u in fetched)
+    assert result.stats == {REFRESHED: 1, SKIPPED: 1}
+
+
+def test_ingest_reports_without_resume_downloads_all(storage: Storage) -> None:
+    """Sin resume ni since_days se recorre la plantilla entera aunque haya raw."""
+    squad = _competition_payload("alex-fores", "leo-messi")
+    ingest_reports(
+        storage, "la-liga", "2025", transport=RoutingTransport(squad, PLAYER_LA_LIGA.read_bytes())
+    )
+
+    again = RoutingTransport(squad, PLAYER_LA_LIGA.read_bytes())
+    result = ingest_reports(storage, "la-liga", "2025", transport=again)
+
+    assert len(_player_fetches(again)) == 2
+    assert result.stats == {REFRESHED: 2, SKIPPED: 0}
+
+
+def test_cli_ingest_reports_resume_and_delta_conflict(tmp_path: Path, capsys) -> None:
+    exit_code = main(
+        [
+            "ingest",
+            "biwenger",
+            "--competition",
+            "la-liga",
+            "--season",
+            "2026",
+            "--delta",
+            "--resume",
+            "--data",
+            f"file://{tmp_path}",
+        ]
+    )
+    assert exit_code == 2
+    assert "no aplican a --delta" in capsys.readouterr().out
+
+
+def test_cli_ingest_reports_resume_end_to_end(tmp_path: Path, monkeypatch, capsys) -> None:
+    def fake_get(self, url, params=None) -> bytes:
+        if "/players/" in url:
+            return PLAYER_LA_LIGA.read_bytes()
+        return _competition_payload("alex-fores")
+
+    monkeypatch.setattr("lfdata.sources.http.HttpTransport.get", fake_get)
+    argv = [
+        "ingest",
+        "biwenger",
+        "--competition",
+        "la-liga",
+        "--season",
+        "2025",
+        "--resume",
+        "--data",
+        f"file://{tmp_path}",
+    ]
+    assert main(argv) == 0  # primer run descarga
+    capsys.readouterr()
+    assert main(argv) == 0  # segundo run salta
+    out = capsys.readouterr().out
+    assert f"{SKIPPED}: 1" in out
 
 
 def test_cli_ingest_reports_404_exit_code(tmp_path: Path, monkeypatch, capsys) -> None:
