@@ -9,6 +9,14 @@ plataforma necesita) y buscamos su contraparte en Transfermarkt:
    nombre compatible se aprueba solo (``auto``); varios candidatos, o candidatos
    en otro club (posible cesión), o ninguno, van al fichero de revisión.
 
+La asignación automática es **global, no greedy por orden de id** (issue #40): se
+calculan todas las compatibilidades sobre un scope fijo y solo se auto-aprueban
+los pares **biunívocos** (un lado de Biwenger compatible con exactamente un lado
+de Transfermarkt que, a su vez, no es compatible con ningún otro de Biwenger).
+Cuando dos entidades de Biwenger se disputan la misma contraparte, ninguna se
+auto-aprueba: todas las implicadas van a revisión con motivo ``candidato-compartido``
+para que el revisor vea el cuadro completo, en vez de que el orden decida.
+
 Antes de regenerar candidatos se aplican las ``decision`` que un humano haya
 rellenado en los ficheros de revisión (``y`` = este candidato; ``skip`` = sin
 contraparte en Transfermarkt, se le da ID canónico solo con Biwenger). El proceso
@@ -314,7 +322,11 @@ def _map_teams(
         today=today,
     )
 
-    review_rows: list[dict] = []
+    # Grafo bipartito Biwenger↔Transfermarkt por competición sobre un scope fijo
+    # (clubs no tomados por aprobados/manuales). Calcular todo antes de aprobar
+    # hace el resultado independiente del orden de los ids.
+    pending: list[tuple[str, object, str, list[dict]]] = []
+    club_suitors: dict[str, set[str]] = defaultdict(set)
     for team in biw_teams.sort_values(["competition", "id"]).itertuples():
         biw_id = str(int(team.id))
         if biw_id in approved:
@@ -322,18 +334,23 @@ def _map_teams(
         competition = str(team.competition)
         scope = [c for c in clubs if c["competition"] == competition and c["club_id"] not in taken]
         cands = team_candidates(str(team.name), scope)
-        if len(cands) == 1:
-            canonical = store.new_team_canonical()
+        pending.append((biw_id, team, competition, cands))
+        for club in cands:
+            club_suitors[club["club_id"]].add(biw_id)
+
+    review_rows: list[dict] = []
+    for biw_id, team, competition, cands in pending:
+        if len(cands) == 1 and len(club_suitors[cands[0]["club_id"]]) == 1:
+            # Par biunívoco: un único candidato que a su vez no reclama nadie más.
             store.add_team(
-                canonical,
+                store.new_team_canonical(),
                 [(BIWENGER, biw_id), (TRANSFERMARKT, cands[0]["club_id"])],
                 method="auto",
                 date=today,
             )
             approved.add(biw_id)
-            taken.add(cands[0]["club_id"])
         else:
-            review_rows += _team_review_rows(biw_id, team, competition, cands)
+            review_rows += _team_review_rows(biw_id, team, competition, cands, club_suitors)
 
     store.teams_review = _preserve_decisions(
         review_rows, old_review, approved, TEAM_REVIEW_COLUMNS, ("biwenger_id", "tm_club_id")
@@ -341,7 +358,9 @@ def _map_teams(
     return unapplied
 
 
-def _team_review_rows(biw_id: str, team, competition: str, cands: list[dict]) -> list[dict]:
+def _team_review_rows(
+    biw_id: str, team, competition: str, cands: list[dict], club_suitors: dict[str, set[str]]
+) -> list[dict]:
     if not cands:
         return [
             {
@@ -354,6 +373,10 @@ def _team_review_rows(biw_id: str, team, competition: str, cands: list[dict]) ->
                 "decision": "",
             }
         ]
+    # Si algún candidato lo reclama también otro equipo de Biwenger, el conflicto
+    # es de reparto (candidato-compartido) y prima sobre la mera ambigüedad local.
+    shared = any(len(club_suitors[club["club_id"]]) > 1 for club in cands)
+    motivo = "candidato-compartido" if shared else "varios-candidatos"
     return [
         {
             "biwenger_id": biw_id,
@@ -361,7 +384,7 @@ def _team_review_rows(biw_id: str, team, competition: str, cands: list[dict]) ->
             "competition": competition,
             "tm_club_id": club["club_id"],
             "tm_club_name": club["club_name"],
-            "motivo": "varios-candidatos",
+            "motivo": motivo,
             "decision": "",
         }
         for club in cands
@@ -409,7 +432,12 @@ def _map_players(
         today=today,
     )
 
-    review_rows: list[dict] = []
+    # Grafo bipartito por equipo canónico sobre un scope fijo (jugadores del club
+    # no tomados). Se calcula primero para todos y solo después se auto-aprueba,
+    # de modo que dos jugadores de Biwenger que se disputen el mismo homónimo de
+    # Transfermarkt vayan ambos a revisión, sin que el orden decida.
+    pending: list[tuple[str, object, str | None, str, list[dict]]] = []
+    tm_suitors: dict[str, set[str]] = defaultdict(set)
     for player in biw_players.sort_values(["competition", "id"]).itertuples():
         biw_id = str(int(player.id))
         if biw_id in approved:
@@ -426,6 +454,19 @@ def _map_players(
             if c["id"] not in taken
         ]
         cands = player_candidates(str(player.name), in_club)
+        pending.append((biw_id, player, canonical_team, biw_birth, cands))
+        for c in cands:
+            tm_suitors[c["id"]].add(biw_id)
+
+    review_rows: list[dict] = []
+    for biw_id, player, canonical_team, biw_birth, cands in pending:
+        if any(len(tm_suitors[c["id"]]) > 1 for c in cands):
+            # Algún candidato en el club lo reclama también otro jugador de
+            # Biwenger: nadie se auto-aprueba; a revisión con el cuadro completo.
+            review_rows += [
+                _player_row(biw_id, player, c, "candidato-compartido", biw_birth) for c in cands
+            ]
+            continue
         if len(cands) == 1:
             only = cands[0]
             if birthdate_compatible(biw_birth, only["birth_date"]):
@@ -436,7 +477,6 @@ def _map_players(
                     date=today,
                 )
                 approved.add(biw_id)
-                taken.add(only["id"])
                 continue
             # Homónimo único en el club pero con fecha discrepante: no se aprueba
             # solo; va a revisión con ambas fechas como evidencia del desempate.

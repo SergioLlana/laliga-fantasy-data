@@ -268,6 +268,100 @@ def test_team_without_candidate_goes_to_review(storage: Storage, tmp_path: Path)
     assert store.teams_review["motivo"].tolist() == ["sin-candidato"]
 
 
+# --- matching biunívoco: candidato compartido (#40) --------------------------
+
+# Caso filial en Segunda: eliminados los stopwords de club "b"/"ii", tanto
+# "Real Madrid" como "Real Madrid Castilla" son compatibles con "Real Madrid" y
+# con "Real Madrid B" de Transfermarkt. Ninguna pareja es biunívoca.
+FILIAL_TM = [
+    {"id": 20, "name": "Jugador Primer Equipo", "club_id": 100,
+     "club_name": "Real Madrid", "birth_date": "2000-01-01", "position": "Midfielder"},
+    {"id": 21, "name": "Jugador Filial", "club_id": 101,
+     "club_name": "Real Madrid B", "birth_date": "2004-01-01", "position": "Midfielder"},
+]  # fmt: skip
+
+
+def test_shared_team_candidate_goes_to_review_not_greedy(storage: Storage, tmp_path: Path) -> None:
+    """Dos equipos de Biwenger compatibles con el mismo club: ambos a revisión."""
+    seed(
+        storage,
+        teams=[{"id": 1, "name": "Real Madrid"}, {"id": 2, "name": "Real Madrid Castilla"}],
+        players=[],
+        tm_players=FILIAL_TM,
+    )
+    report = run_map(storage, tmp_path / "mappings")
+
+    # Ninguno se auto-aprueba: el reparto es ambiguo por ambos lados.
+    assert report.teams_mapped == 0
+    assert report.teams_review == 2
+
+    store = MappingStore(tmp_path / "mappings")
+    store.load()
+    review = store.teams_review
+    assert set(review["biwenger_id"]) == {"1", "2"}
+    assert set(review["motivo"]) == {"candidato-compartido"}
+    assert store.teams.empty  # nada aprobado
+
+
+def test_shared_player_candidate_goes_to_review(storage: Storage, tmp_path: Path) -> None:
+    """Dos jugadores de Biwenger compatibles con el mismo jugador de TM: revisión."""
+    seed(
+        storage,
+        teams=[{"id": 1, "name": "Athletic"}],
+        # Ambos ('Williams') son compatibles con el único Iñaki Williams (10).
+        players=[
+            {"id": 100, "name": "Williams", "team_id": 1},
+            {"id": 101, "name": "Williams", "team_id": 1},
+        ],
+        tm_players=[
+            {
+                "id": 10,
+                "name": "Iñaki Williams",
+                "club_id": 1,
+                "club_name": "Athletic Bilbao",
+                "birth_date": "1994-06-15",
+                "position": "Right Winger",
+            },
+        ],  # fmt: skip
+    )
+    report = run_map(storage, tmp_path / "mappings")
+
+    assert report.players_auto == 0
+    assert report.players_review == 2
+
+    store = MappingStore(tmp_path / "mappings")
+    store.load()
+    review = store.players_review
+    assert set(review["biwenger_id"]) == {"100", "101"}
+    assert set(review["motivo"]) == {"candidato-compartido"}
+    # Ningún jugador con contraparte de Transfermarkt aprobada.
+    assert store.players[store.players["fuente"] == "transfermarkt"].empty
+
+
+def test_map_result_is_independent_of_id_order(storage: Storage, tmp_path: Path) -> None:
+    """El grafo se resuelve global: invertir los ids no cambia el resultado."""
+
+    def run_with_ids(id_a: int, id_b: int, root: Path) -> set[tuple[str, str]]:
+        seed(
+            storage,
+            teams=[
+                {"id": id_a, "name": "Real Madrid"},
+                {"id": id_b, "name": "Real Madrid Castilla"},
+            ],
+            players=[],
+            tm_players=FILIAL_TM,
+        )
+        run_map(storage, root)
+        store = MappingStore(root)
+        store.load()
+        return {(r.biwenger_name, r.motivo) for r in store.teams_review.itertuples()}
+
+    low_first = run_with_ids(1, 2, tmp_path / "a")
+    high_first = run_with_ids(2, 1, tmp_path / "b")
+    assert low_first == high_first
+    assert all(motivo == "candidato-compartido" for _, motivo in low_first)
+
+
 # --- idempotencia y decisiones manuales --------------------------------------
 
 
