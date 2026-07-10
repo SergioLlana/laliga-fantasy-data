@@ -1,0 +1,33 @@
+# Mappings de identidad canónica
+
+La correspondencia entre los IDs de cada fuente y nuestro **jugador/equipo
+canónico** (ADR 0001). Vive en git, no en S3: el trabajo manual de revisión es
+código y se revisa en pull request.
+
+Anclamos la identidad en **Biwenger** (el universo que la plataforma necesita) y
+buscamos su contraparte en **Transfermarkt** por club mapeado + nombre
+normalizado. Biwenger no publica fecha de nacimiento en sus tablas curadas, así
+que el desempate por fecha se hace a mano con la evidencia de Transfermarkt
+(issue #8).
+
+## Ficheros
+
+| Fichero | Qué contiene |
+|---|---|
+| `players.csv` / `teams.csv` | Mappings **aprobados**. Formato largo: una fila por `(fuente, id_en_fuente)`, todas con el mismo `canonical_id`. `metodo` es `auto` o `manual`. |
+| `players-review.csv` / `teams-review.csv` | **Candidatos dudosos** con sus evidencias y una columna `decision` vacía. |
+
+## Flujo
+
+1. `lfdata map` regenera candidatos: aprueba los seguros (`auto`) y deja los
+   dudosos en los ficheros de revisión.
+2. Rellena a mano la columna `decision` de los dudosos:
+   - `y` en la fila del candidato correcto de Transfermarkt.
+   - `skip` si el jugador no tiene contraparte en Transfermarkt (se le da ID
+     canónico solo con Biwenger).
+   - En blanco = sigue pendiente.
+3. `lfdata map` de nuevo: promueve las decisiones a `players.csv`/`teams.csv`
+   (como `manual`) y vuelve a proponer solo lo que siga sin resolver. Es
+   idempotente: lo aprobado no se vuelve a tocar.
+4. `lfdata map --check` falla (CI y pipeline) si algún jugador o equipo de
+   Biwenger presente en las tablas curadas se quedó sin `canonical_id`.
