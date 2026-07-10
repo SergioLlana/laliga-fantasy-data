@@ -2,16 +2,42 @@
 
 El destino es una URI base: ``file://./data`` en desarrollo,
 ``s3://...`` en producción (backend S3 pendiente, issue #5).
+
+Las dos capas operan exclusivamente contra :class:`StorageBackend`, un
+protocolo de cuatro operaciones (``write_bytes``, ``read_bytes``, ``exists``,
+``list_keys``) que un backend S3 puede implementar tal cual. Ninguna store
+conoce la naturaleza de sistema de ficheros del backend local.
 """
 
 from __future__ import annotations
 
 import io
+import os
+import tempfile
 from collections.abc import Mapping
+from contextlib import suppress
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 import pandas as pd
+
+
+@runtime_checkable
+class StorageBackend(Protocol):
+    """Almacén de bytes direccionado por clave, agnóstico del medio.
+
+    Una clave es una ruta relativa estilo POSIX (``raw/.../x.json``). Un prefijo
+    es una clave parcial; ``list_keys`` enumera todo lo que cuelga de él.
+    """
+
+    def write_bytes(self, key: str, payload: bytes) -> None: ...
+
+    def read_bytes(self, key: str) -> bytes: ...
+
+    def exists(self, key: str) -> bool: ...
+
+    def list_keys(self, prefix: str) -> list[str]: ...
 
 
 class LocalBackend:
@@ -20,17 +46,39 @@ class LocalBackend:
     def __init__(self, root: Path) -> None:
         self.root = root
 
-    def write_bytes(self, key: str, payload: bytes) -> Path:
+    def write_bytes(self, key: str, payload: bytes) -> None:
+        """Escritura atómica: fichero temporal en el mismo directorio + rename.
+
+        Un proceso interrumpido a media escritura no deja un Parquet corrupto en
+        la partición: hasta el ``os.replace`` final la clave conserva su valor
+        anterior (o no existe), y el temporal se limpia si algo falla.
+        """
         path = self.root / key
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(payload)
-        return path
+        fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(payload)
+            os.replace(tmp_name, path)
+        except BaseException:
+            with suppress(FileNotFoundError):
+                os.unlink(tmp_name)
+            raise
 
     def read_bytes(self, key: str) -> bytes:
         return (self.root / key).read_bytes()
 
+    def exists(self, key: str) -> bool:
+        return (self.root / key).exists()
 
-def backend_from_uri(base_uri: str) -> LocalBackend:
+    def list_keys(self, prefix: str) -> list[str]:
+        base = self.root / prefix
+        if not base.exists():
+            return []
+        return sorted(p.relative_to(self.root).as_posix() for p in base.rglob("*") if p.is_file())
+
+
+def backend_from_uri(base_uri: str) -> StorageBackend:
     if base_uri.startswith("file://"):
         return LocalBackend(Path(base_uri.removeprefix("file://")))
     if base_uri.startswith("s3://"):
@@ -41,7 +89,7 @@ def backend_from_uri(base_uri: str) -> LocalBackend:
 class RawStore:
     """Respuestas de las fuentes tal cual llegan, antes de interpretarlas."""
 
-    def __init__(self, backend: LocalBackend) -> None:
+    def __init__(self, backend: StorageBackend) -> None:
         self._backend = backend
 
     def save(
@@ -70,15 +118,15 @@ class RawStore:
         queda con la más nueva que contenga el fichero pedido. Sirve para saltar
         en un backfill lo que ya se descargó hace poco (``--since-days``).
         """
-        base = self._backend.root / "raw" / source / dataset
-        if not base.exists():
-            return None
+        prefix = f"raw/{source}/{dataset}/"
+        suffix = f"/{name}.{extension}"
         dates: list[date] = []
-        for partition in base.glob("fecha_descarga=*"):
-            if not (partition / f"{name}.{extension}").exists():
+        for key in self._backend.list_keys(prefix):
+            if not key.endswith(suffix):
                 continue
+            partition = key[len(prefix) :].split("/", 1)[0]
             try:
-                dates.append(date.fromisoformat(partition.name.removeprefix("fecha_descarga=")))
+                dates.append(date.fromisoformat(partition.removeprefix("fecha_descarga=")))
             except ValueError:
                 continue
         return max(dates) if dates else None
@@ -87,7 +135,7 @@ class RawStore:
 class CuratedStore:
     """Tablas Parquet por nombre, con particiones opcionales estilo Hive."""
 
-    def __init__(self, backend: LocalBackend) -> None:
+    def __init__(self, backend: StorageBackend) -> None:
         self._backend = backend
 
     def write_table(
@@ -123,10 +171,10 @@ class CuratedStore:
         parcial refresca solo esos ``key`` sin borrar a los demás. Sobre una
         partición vacía equivale a :meth:`write_table`.
         """
-        path = self._backend.root / self._table_key(table, partition)
+        table_key = self._table_key(table, partition)
         incoming = df.drop(columns=[col for col in (partition or {}) if col in df.columns])
-        if path.exists():
-            existing = pd.read_parquet(path)
+        if self._backend.exists(table_key):
+            existing = pd.read_parquet(io.BytesIO(self._backend.read_bytes(table_key)))
             kept = existing[~existing[key].isin(set(incoming[key]))]
             combined = pd.concat([kept, incoming], ignore_index=True)
         else:
@@ -147,10 +195,10 @@ class CuratedStore:
         la tabla a quien ya no aparece en ninguna plantilla. Devuelve cuántas
         filas se eliminaron; sobre una partición inexistente no hace nada.
         """
-        path = self._backend.root / self._table_key(table, partition)
-        if not path.exists():
+        table_key = self._table_key(table, partition)
+        if not self._backend.exists(table_key):
             return 0
-        existing = pd.read_parquet(path)
+        existing = pd.read_parquet(io.BytesIO(self._backend.read_bytes(table_key)))
         kept = existing[existing[key].isin(keep)]
         removed = len(existing) - len(kept)
         if removed:
@@ -165,12 +213,30 @@ class CuratedStore:
         return f"curated/{table}.parquet"
 
     def read_table(self, table: str) -> pd.DataFrame:
-        """Lee la tabla completa, incluidas todas sus particiones."""
-        root = self._backend.root / "curated"
-        single = root / f"{table}.parquet"
-        if single.exists():
-            return pd.read_parquet(single)
-        return pd.read_parquet(root / table)
+        """Lee la tabla completa, incluidas todas sus particiones.
+
+        Enumera con ``list_keys`` los ``data.parquet`` bajo la tabla, lee cada
+        uno y reconstruye las columnas de partición desde la clave (estilo Hive),
+        fijando su tipo a ``str`` para no depender de la inferencia de pyarrow.
+        """
+        single = self._table_key(table, None)
+        if self._backend.exists(single):
+            return pd.read_parquet(io.BytesIO(self._backend.read_bytes(single)))
+
+        prefix = f"curated/{table}/"
+        suffix = "/data.parquet"
+        frames: list[pd.DataFrame] = []
+        for key in self._backend.list_keys(prefix):
+            if not key.endswith(suffix):
+                continue
+            frame = pd.read_parquet(io.BytesIO(self._backend.read_bytes(key)))
+            for segment in key[len(prefix) : -len(suffix)].split("/"):
+                name, _, value = segment.partition("=")
+                frame[name] = value
+            frames.append(frame)
+        if not frames:
+            raise FileNotFoundError(f"No hay datos curados para la tabla {table!r}")
+        return pd.concat(frames, ignore_index=True)
 
 
 class Storage:

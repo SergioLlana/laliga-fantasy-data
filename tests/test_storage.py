@@ -4,7 +4,33 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from lfdata.storage import Storage, backend_from_uri
+from lfdata.storage import (
+    CuratedStore,
+    LocalBackend,
+    RawStore,
+    Storage,
+    StorageBackend,
+    backend_from_uri,
+)
+
+
+class InMemoryBackend:
+    """Backend fake que implementa el protocolo sin tocar disco."""
+
+    def __init__(self) -> None:
+        self._data: dict[str, bytes] = {}
+
+    def write_bytes(self, key: str, payload: bytes) -> None:
+        self._data[key] = payload
+
+    def read_bytes(self, key: str) -> bytes:
+        return self._data[key]
+
+    def exists(self, key: str) -> bool:
+        return key in self._data
+
+    def list_keys(self, prefix: str) -> list[str]:
+        return sorted(k for k in self._data if k.startswith(prefix))
 
 
 @pytest.fixture
@@ -97,3 +123,55 @@ def test_unsupported_uri_scheme_raises() -> None:
         backend_from_uri("ftp://x")
     with pytest.raises(NotImplementedError, match="issue #5"):
         backend_from_uri("s3://bucket")
+
+
+def test_in_memory_backend_satisfies_protocol() -> None:
+    assert isinstance(InMemoryBackend(), StorageBackend)
+
+
+def test_stores_run_against_a_fake_backend_without_touching_disk() -> None:
+    backend = InMemoryBackend()
+    raw = RawStore(backend)
+    curated = CuratedStore(backend)
+
+    # RawStore: guardar y localizar la fecha de descarga más reciente.
+    raw.save("s", "d", "x", b"1", download_date=date(2026, 7, 1))
+    raw.save("s", "d", "x", b"2", download_date=date(2026, 7, 5))
+    raw.save("s", "d", "other", b"3", download_date=date(2026, 7, 9))
+    assert raw.last_download_date("s", "d", "x") == date(2026, 7, 5)
+    assert raw.last_download_date("s", "d", "missing") is None
+
+    # CuratedStore: upsert reanudable y lectura particionada reconstruida.
+    partition = {"competition": "la-liga"}
+    curated.upsert_table(
+        "t", pd.DataFrame({"player_id": [1, 2], "value": [10, 20]}), partition=partition
+    )
+    curated.upsert_table(
+        "t", pd.DataFrame({"player_id": [1, 3], "value": [99, 30]}), partition=partition
+    )
+    read = curated.read_table("t").sort_values("player_id").reset_index(drop=True)
+    assert read["player_id"].tolist() == [1, 2, 3]
+    assert read["value"].tolist() == [99, 20, 30]
+    # La columna de partición se reconstruye desde la clave como str.
+    assert read["competition"].tolist() == ["la-liga"] * 3
+    assert pd.api.types.is_string_dtype(read["competition"])
+
+    # retain_keys sobre el fake.
+    removed = curated.retain_keys("t", keep={1, 3}, key="player_id", partition=partition)
+    assert removed == 1
+    assert sorted(curated.read_table("t")["player_id"]) == [1, 3]
+
+
+def test_read_table_missing_raises() -> None:
+    with pytest.raises(FileNotFoundError):
+        CuratedStore(InMemoryBackend()).read_table("nope")
+
+
+def test_local_write_is_atomic_and_leaves_no_temp_file(tmp_path: Path) -> None:
+    backend = LocalBackend(tmp_path)
+    backend.write_bytes("curated/t/data.parquet", b"payload")
+    target = tmp_path / "curated" / "t" / "data.parquet"
+    assert target.read_bytes() == b"payload"
+    # Ni temporales huérfanos ni ficheros ocultos en el directorio destino.
+    siblings = list(target.parent.iterdir())
+    assert siblings == [target]
