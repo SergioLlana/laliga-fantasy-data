@@ -23,6 +23,10 @@ class FakeCall:
     params: dict | None
 
 
+class FakeTimeout(Exception):
+    """Doble del timeout de transporte de curl-cffi para los tests."""
+
+
 @dataclass
 class FakeSession:
     responses: list[FakeResponse]
@@ -30,7 +34,10 @@ class FakeSession:
 
     def get(self, url, params=None):
         self.calls.append(FakeCall(url, dict(params) if params else None))
-        return self.responses.pop(0)
+        item = self.responses.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item
 
 
 class FakeClock:
@@ -88,6 +95,31 @@ def test_gives_up_after_max_retries() -> None:
 def test_non_retryable_status_fails_immediately() -> None:
     transport, _ = make_transport([FakeResponse(404)], wait_seconds=0.0)
     with pytest.raises(SourceHTTPError, match="HTTP 404"):
+        transport.get("https://x/a")
+
+
+def test_retries_on_transport_timeout_then_succeeds() -> None:
+    transport, clock = make_transport(
+        [FakeTimeout(), FakeResponse(200, b"al fin")],
+        wait_seconds=0.0,
+        retry_wait_seconds=5.0,
+        retryable_exceptions=(FakeTimeout,),
+    )
+    assert transport.get("https://x/a") == b"al fin"
+    assert clock.sleeps == [5.0]
+
+
+def test_persistent_timeout_becomes_504_not_a_crash() -> None:
+    # Agotados los reintentos, un timeout se traduce a SourceHTTPError 504: la
+    # fuente lo trata como fallo saltable, no revienta el run entero.
+    transport, _ = make_transport(
+        [FakeTimeout()] * 3,
+        wait_seconds=0.0,
+        max_retries=2,
+        retry_wait_seconds=0.0,
+        retryable_exceptions=(FakeTimeout,),
+    )
+    with pytest.raises(SourceHTTPError, match="HTTP 504"):
         transport.get("https://x/a")
 
 
