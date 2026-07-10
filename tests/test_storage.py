@@ -66,6 +66,18 @@ def test_curated_store_partitioned_write_is_readable(storage: Storage, tmp_path:
     assert pd.read_parquet(tmp_path / key)["id"].tolist() == [1]
 
 
+def test_numeric_looking_season_partition_reads_back_as_str(storage: Storage) -> None:
+    # `season` se escribe como str ("2026"); al reconstruir la partición desde la
+    # clave se relee como str, sin que pyarrow la infiera como int.
+    partition = {"competition": "la-liga", "season": "2026"}
+    df = pd.DataFrame({"player_id": [1], "value": [10]})
+    storage.curated.write_table("fantasy_points", df, partition=partition)
+
+    read = storage.curated.read_table("fantasy_points")
+    assert read["season"].tolist() == ["2026"]
+    assert pd.api.types.is_string_dtype(read["season"])
+
+
 def test_upsert_on_empty_partition_equals_write(storage: Storage) -> None:
     df = pd.DataFrame({"player_id": [1, 2], "value": [10, 20], "competition": ["la-liga"] * 2})
     storage.curated.upsert_table("t", df, partition={"competition": "la-liga"})

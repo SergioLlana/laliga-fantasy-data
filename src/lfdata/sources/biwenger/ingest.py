@@ -26,6 +26,9 @@ POINT_SYSTEMS = {
 }
 POINT_COLUMNS = list(POINT_SYSTEMS.values())
 
+# Motivo de anomalía: reports que Biwenger sirve con puntos pero sin rawStats.
+POINTS_WITHOUT_STATS = "reports con puntos sin rawStats"
+
 # Los reports se escriben por lotes de este tamaño (en jugadores): un fallo tras
 # el jugador N conserva en curated todo lote ya volcado, en vez de tirar el run.
 REPORTS_BATCH_SIZE = 25
@@ -107,6 +110,11 @@ def _birthday_to_iso(stamp: int | None) -> str | None:
     if stamp is None:
         return None
     return date(stamp // 10000, stamp // 100 % 100, stamp % 100).isoformat()
+
+
+def _points_without_stats(detail: PlayerDetail) -> int:
+    """Cuántos reports del jugador traen puntos pero les falta ``rawStats``."""
+    return sum(report.points_without_stats for report in detail.reports)
 
 
 def _points_rows(detail: PlayerDetail) -> list[dict]:
@@ -194,6 +202,7 @@ def ingest_reports(
 
     partition = {"competition": competition, "season": season}
     result = IngestResult(rows={"fantasy_points": 0, "biwenger_prices": 0})
+    points_without_stats = 0
     total = len(data.players)
     batch_points: list[dict] = []
     batch_prices: list[dict] = []
@@ -241,17 +250,33 @@ def ingest_reports(
         batch_prices.extend(_price_rows(detail))
         batch_players.append(player)
         births[player.id] = _birthday_to_iso(detail.birthday)
+        incomplete = _points_without_stats(detail)
+        if incomplete:
+            points_without_stats += incomplete
+            logger.warning(
+                "biwenger %s [%d/%d] %s: %d reports con puntos pero sin rawStats, sin curar",
+                competition,
+                index,
+                total,
+                player.slug,
+                incomplete,
+            )
         logger.info("biwenger %s [%d/%d] %s", competition, index, total, player.slug)
         if index % batch_size == 0:
             flush()
     flush()
 
+    if points_without_stats:
+        result.anomalies[POINTS_WITHOUT_STATS] = points_without_stats
+
     logger.info(
-        "biwenger reports %s %s: %d filas de puntos, %d de precios, %d fallidos",
+        "biwenger reports %s %s: %d filas de puntos, %d de precios, %d fallidos, "
+        "%d reports con puntos sin rawStats",
         competition,
         season,
         result.rows["fantasy_points"],
         result.rows["biwenger_prices"],
         len(result.failures),
+        points_without_stats,
     )
     return result

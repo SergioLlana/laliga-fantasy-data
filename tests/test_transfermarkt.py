@@ -89,6 +89,15 @@ def test_unknown_competition_rejected(storage: Storage) -> None:
         client.fetch_competition_clubs("premier", season=2025)
 
 
+def test_competition_clubs_raw_names_include_season(storage: Storage, tmp_path: Path) -> None:
+    # Dos temporadas ingeridas el mismo día no se pisan: el nombre lleva la temporada.
+    client = TransfermarktClient(RoutingTransport(default_routes()), storage.raw)
+    client.fetch_competition_clubs("la-liga", season=2024)
+    client.fetch_competition_clubs("la-liga", season=2025)
+    names = sorted(p.name for p in raw_files(tmp_path) if "competition-clubs" in p.as_posix())
+    assert names == ["ES1-saison-2024.html", "ES1-saison-2025.html"]
+
+
 def test_fetch_squad(storage: Storage) -> None:
     transport = RoutingTransport(default_routes())
     squad = TransfermarktClient(transport, storage.raw).fetch_squad(2497, season=2025)
@@ -108,6 +117,18 @@ def test_fetch_player_profile(storage: Storage) -> None:
     assert profile.name == "Álex Forés"
     assert profile.birth_date == date(2001, 4, 12)
     assert profile.position == "Centre-Forward"
+
+
+def test_empty_slug_falls_back_to_placeholder(storage: Storage) -> None:
+    # Un jugador con slug vacío en la plantilla no debe producir URLs con `//`.
+    transport = RoutingTransport(default_routes())
+    client = TransfermarktClient(transport, storage.raw)
+    client.fetch_player_profile(FORES, slug="")
+    client.fetch_injuries(FORES, slug="   ")  # solo espacios cuenta como vacío
+    for url in transport.urls:
+        assert "//" not in url.removeprefix("https://")
+    assert f"/spieler/profil/spieler/{FORES}" in transport.urls[0]
+    assert f"/spieler/verletzungen/spieler/{FORES}" in transport.urls[1]
 
 
 def test_profile_name_drops_shirt_number() -> None:

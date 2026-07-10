@@ -102,6 +102,16 @@ class Report(_BiwengerModel):
     def scored(self) -> bool:
         return self.points is not None and self.raw_stats is not None
 
+    @property
+    def points_without_stats(self) -> bool:
+        """Puntuó (trae ``points``) pero le falta ``rawStats``: fila incompleta.
+
+        No genera fila en ``fantasy_points`` (dependemos de minutos, nota y
+        resultado de ``rawStats``); la ingesta lo cuenta como anomalía en vez de
+        saltarlo en silencio.
+        """
+        return self.points is not None and self.raw_stats is None
+
 
 class PlayerDetail(_BiwengerModel):
     id: int
