@@ -26,16 +26,27 @@ class PlayerFailure:
 
 @dataclass
 class IngestResult:
-    """Filas escritas por tabla y los jugadores que fallaron durante el run."""
+    """Filas escritas por tabla y los jugadores que fallaron durante el run.
+
+    ``anomalies`` cuenta, por motivo, los datos que la fuente sirvió incompletos y
+    no llegaron a las tablas curadas (p. ej. reports de Biwenger con puntos pero
+    sin ``rawStats``): no abortan el run, pero se cuentan para que el resumen no
+    los silencie.
+    """
 
     rows: dict[str, int] = field(default_factory=dict)
     failures: list[PlayerFailure] = field(default_factory=list)
+    anomalies: dict[str, int] = field(default_factory=dict)
 
     def merge(self, other: IngestResult) -> IngestResult:
         """Une dos resultados (suma tablas distintas, concatena fallos)."""
+        anomalies = dict(self.anomalies)
+        for reason, count in other.anomalies.items():
+            anomalies[reason] = anomalies.get(reason, 0) + count
         return IngestResult(
             rows={**self.rows, **other.rows},
             failures=[*self.failures, *other.failures],
+            anomalies=anomalies,
         )
 
     __or__ = merge

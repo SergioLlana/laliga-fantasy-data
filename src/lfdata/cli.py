@@ -102,9 +102,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _report_ingest(result, competition: str, data: str) -> int:
-    """Imprime filas por tabla y el resumen de fallos; 1 si hubo alguno."""
+    """Imprime filas por tabla, anomalías y el resumen de fallos; 1 si hubo alguno."""
     for table, count in result.rows.items():
         print(f"{table}: {count} filas ({competition}) -> {data}")
+    for reason, count in result.anomalies.items():
+        print(f"anomalía: {count} {reason}")
     if not result.failures:
         return 0
     print(f"\n{len(result.failures)} jugadores fallaron y se saltaron:")

@@ -287,6 +287,78 @@ def test_ingest_reports_fills_birth_date_on_players(storage: Storage) -> None:
     assert row["name"] == "alex-fores"  # el resto de la fila se conserva
 
 
+# --- reports con puntos pero sin rawStats (#39) -----------------------------
+
+
+def _detail_with_reports(reports: list[dict]) -> bytes:
+    return json.dumps(
+        {
+            "status": 200,
+            "data": {
+                "id": 1,
+                "name": "alex-fores",
+                "slug": "alex-fores",
+                "birthday": 20010412,
+                "reports": reports,
+                "prices": [[250721, 230000]],
+            },
+        }
+    ).encode()
+
+
+def _report(match_id: int, *, points: dict | None, raw_stats: dict | None) -> dict:
+    report: dict = {"home": True, "match": {"id": match_id, "round": {"id": 1, "name": "J1"}}}
+    if points is not None:
+        report["points"] = points
+    if raw_stats is not None:
+        report["rawStats"] = raw_stats
+    return report
+
+
+_FULL_STATS = {"minutesPlayed": 90, "sofascore": 7.0, "homeScore": 1, "awayScore": 0, "win": True}
+
+
+def test_reports_with_points_but_no_rawstats_are_counted(storage: Storage) -> None:
+    detail = _detail_with_reports(
+        [
+            _report(10, points={"1": 2}, raw_stats=_FULL_STATS),  # completo -> fila
+            _report(20, points={"1": 3}, raw_stats=None),  # puntos sin rawStats -> anomalía
+        ]
+    )
+    transport = RoutingTransport(_competition_payload("alex-fores"), detail)
+    result = ingest_reports(storage, "la-liga", "2026", transport=transport)
+
+    # Solo el report completo llega a curated; el otro se cuenta, no se silencia.
+    assert result.rows["fantasy_points"] == 1
+    assert result.anomalies == {"reports con puntos sin rawStats": 1}
+    assert len(storage.curated.read_table("fantasy_points")) == 1
+
+
+def test_cli_ingest_reports_reports_anomaly(tmp_path: Path, monkeypatch, capsys) -> None:
+    detail = _detail_with_reports([_report(20, points={"1": 3}, raw_stats=None)])
+
+    def fake_get(self, url, params=None) -> bytes:
+        return detail if "/players/" in url else _competition_payload("alex-fores")
+
+    monkeypatch.setattr("lfdata.sources.http.HttpTransport.get", fake_get)
+    exit_code = main(
+        [
+            "ingest",
+            "biwenger",
+            "--competition",
+            "la-liga",
+            "--season",
+            "2026",
+            "--data",
+            f"file://{tmp_path}",
+        ]
+    )
+    # Es un aviso de calidad, no un fallo: no cambia el código de salida.
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "anomalía: 1 reports con puntos sin rawStats" in out
+
+
 # --- resiliencia: un fallo por jugador no aborta el run (#36) ---------------
 
 

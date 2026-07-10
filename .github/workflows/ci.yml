@@ -21,5 +21,8 @@ jobs:
           uv run ruff format --check .
       - name: Tests
         run: uv run pytest
-      - name: Mappings al día
-        run: uv run lfdata map --check
+      # El paso "Mappings al día" (`lfdata map --check`) se retiró: en CI no hay
+      # tablas curadas (data/ está en .gitignore), así que pasaba en vacío sin
+      # verificar nada. El comando se ejerce end-to-end contra datos sintéticos en
+      # la suite (tests/test_mappings.py::test_cli_map_and_check). Vuelve a CI
+      # cuando exista un pipeline que deje un snapshot curado que comprobar.

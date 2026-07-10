@@ -8,6 +8,8 @@ antes de intentar interpretarla.
 
 from __future__ import annotations
 
+import logging
+
 from pydantic import ValidationError
 
 from lfdata.sources.http import HttpTransport
@@ -25,6 +27,13 @@ from lfdata.sources.transfermarkt.parse import (
     SquadMember,
 )
 from lfdata.storage import RawStore
+
+logger = logging.getLogger(__name__)
+
+# Transfermarkt resuelve el perfil por el ID, no por el slug de la URL; cuando la
+# plantilla no trae slug usamos este marcador para no emitir URLs con doble barra
+# (``//profil/spieler/...``), que confunden al proxy y a los logs.
+SLUG_PLACEHOLDER = "spieler"
 
 # Usamos el host .com a propósito: sus respuestas (posiciones, tipo de traspaso,
 # diagnósticos de lesión, nombres de club) vienen en inglés. Todo lo que se cura
@@ -59,7 +68,10 @@ class TransfermarktClient:
         slug, code = COMPETITIONS[competition]
         url = f"{BASE}/{slug}/startseite/wettbewerb/{code}/saison_id/{season}"
         payload = self._transport.get(url)
-        self._raw_store.save("transfermarkt", "competition-clubs", code, payload, extension="html")
+        # La temporada va en el nombre (como en kader): dos temporadas ingeridas
+        # el mismo día conviven en raw/ en vez de pisarse.
+        name = f"{code}-saison-{season}"
+        self._raw_store.save("transfermarkt", "competition-clubs", name, payload, extension="html")
         return parse.parse_competition_clubs(payload)
 
     def fetch_squad(self, club_id: int, *, season: int) -> list[SquadMember]:
@@ -72,7 +84,7 @@ class TransfermarktClient:
 
     def fetch_player_profile(self, player_id: int, *, slug: str) -> PlayerProfile:
         """Perfil de un jugador: nombre, fecha de nacimiento y posición."""
-        url = f"{BASE}/{slug}/profil/spieler/{player_id}"
+        url = f"{BASE}/{self._url_slug(slug, player_id)}/profil/spieler/{player_id}"
         payload = self._transport.get(url)
         self._raw_store.save(
             "transfermarkt", "profile", f"spieler-{player_id}", payload, extension="html"
@@ -81,7 +93,7 @@ class TransfermarktClient:
 
     def fetch_injuries(self, player_id: int, *, slug: str) -> list[Injury]:
         """Historial de lesiones (HTML; no hay endpoint JSON de lesiones)."""
-        url = f"{BASE}/{slug}/verletzungen/spieler/{player_id}"
+        url = f"{BASE}/{self._url_slug(slug, player_id)}/verletzungen/spieler/{player_id}"
         payload = self._transport.get(url)
         self._raw_store.save(
             "transfermarkt", "injuries", f"spieler-{player_id}", payload, extension="html"
@@ -110,6 +122,19 @@ class TransfermarktClient:
         payload = self._transport.get(url)
         self._raw_store.save("transfermarkt", "performance-game", str(player_id), payload)
         return self._validate(PerformanceResponse, payload, url)
+
+    @staticmethod
+    def _url_slug(slug: str, player_id: int) -> str:
+        """Slug para la URL, con fallback genérico si la plantilla no lo trae."""
+        clean = (slug or "").strip()
+        if clean:
+            return clean
+        logger.warning(
+            "transfermarkt spieler %d sin slug en la plantilla; uso %r en la URL",
+            player_id,
+            SLUG_PLACEHOLDER,
+        )
+        return SLUG_PLACEHOLDER
 
     @staticmethod
     def _validate(model, payload: bytes, url: str):
