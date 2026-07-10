@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable, Mapping
 from datetime import date
 
 import pandas as pd
 
 from lfdata.sources.biwenger.client import PROXY_ENABLED, WAIT_SECONDS, BiwengerClient
-from lfdata.sources.biwenger.models import PlayerDetail
+from lfdata.sources.biwenger.models import Player, PlayerDetail
 from lfdata.sources.http import HttpTransport, SourceHTTPError, scrapeops_proxy_from_env
 from lfdata.sources.ingestion import IngestResult, PlayerFailure
 from lfdata.storage import Storage
@@ -29,6 +30,36 @@ POINT_COLUMNS = list(POINT_SYSTEMS.values())
 # el jugador N conserva en curated todo lote ya volcado, en vez de tirar el run.
 REPORTS_BATCH_SIZE = 25
 
+_PLAYER_NULLABLE_INTS = [
+    "team_id",
+    "number",
+    "fantasy_price",
+    "points",
+    "points_home",
+    "points_away",
+    "played_home",
+    "played_away",
+    "points_last_season",
+]
+
+
+def _players_frame(
+    players: Iterable[Player], birth_dates: Mapping[int, str | None] | None = None
+) -> pd.DataFrame:
+    """DataFrame de biwenger_players con ``birth_date`` (ISO) por id, o vacía.
+
+    La plantilla no trae fecha de nacimiento; la aporta la ingesta de reports
+    desde el detalle por jugador (``birth_dates``). Sin ese dato la columna queda
+    ausente y el matcher la trata como faltante.
+    """
+    births = birth_dates or {}
+    records = []
+    for player in players:
+        record = player.model_dump()
+        record["birth_date"] = births.get(player.id)
+        records.append(record)
+    return pd.DataFrame(records).astype(dict.fromkeys(_PLAYER_NULLABLE_INTS, "Int64"))
+
 
 def ingest_squad(
     storage: Storage,
@@ -47,20 +78,7 @@ def ingest_squad(
     client = BiwengerClient(transport, storage.raw)
     data = client.fetch_competition_data(competition).data
 
-    nullable_ints = [
-        "team_id",
-        "number",
-        "fantasy_price",
-        "points",
-        "points_home",
-        "points_away",
-        "played_home",
-        "played_away",
-        "points_last_season",
-    ]
-    players = pd.DataFrame([player.model_dump() for player in data.players.values()]).astype(
-        dict.fromkeys(nullable_ints, "Int64")
-    )
+    players = _players_frame(data.players.values())
     teams = pd.DataFrame([team.model_dump() for team in data.teams.values()])
 
     partition = {"competition": competition}
@@ -78,6 +96,17 @@ def ingest_squad(
 def _date_from_biwenger(stamp: int) -> date:
     """Convierte el entero AAMMDD de Biwenger (250721) en fecha (2025-07-21)."""
     return date(2000 + stamp // 10000, stamp // 100 % 100, stamp % 100)
+
+
+def _birthday_to_iso(stamp: int | None) -> str | None:
+    """Convierte el entero AAAAMMDD del detalle (20010412) en ISO (2001-04-12).
+
+    Distinto del AAMMDD de los precios: la fecha de nacimiento trae el año con
+    cuatro cifras. Devuelve ``None`` si el detalle no la publica.
+    """
+    if stamp is None:
+        return None
+    return date(stamp // 10000, stamp // 100 % 100, stamp % 100).isoformat()
 
 
 def _points_rows(detail: PlayerDetail) -> list[dict]:
@@ -151,6 +180,10 @@ def ingest_reports(
     descargado y reejecutar no duplica. Un jugador que la fuente ya no sirve (404)
     se registra como fallo y se salta sin abortar el run. Devuelve las filas
     escritas por tabla y los jugadores fallidos.
+
+    El detalle trae la fecha de nacimiento (``birthday``), que la plantilla no
+    publica: se refresca en ``biwenger_players`` (upsert por ``id``, misma
+    partición de competición) para endurecer el matching de identidad (#37).
     """
     transport = transport or HttpTransport(
         wait_seconds=WAIT_SECONDS,
@@ -164,9 +197,19 @@ def ingest_reports(
     total = len(data.players)
     batch_points: list[dict] = []
     batch_prices: list[dict] = []
+    batch_players: list[Player] = []
+    births: dict[int, str | None] = {}
 
     def flush() -> None:
+        if batch_players:
+            storage.curated.upsert_table(
+                "biwenger_players",
+                _players_frame(batch_players, births),
+                key="id",
+                partition={"competition": competition},
+            )
         if not batch_points and not batch_prices:
+            batch_players.clear()
             return
         storage.curated.upsert_table(
             "fantasy_points", _points_frame(batch_points), key="player_id", partition=partition
@@ -178,6 +221,7 @@ def ingest_reports(
         result.rows["biwenger_prices"] += len(batch_prices)
         batch_points.clear()
         batch_prices.clear()
+        batch_players.clear()
 
     for index, player in enumerate(data.players.values(), start=1):
         try:
@@ -195,6 +239,8 @@ def ingest_reports(
             continue
         batch_points.extend(_points_rows(detail))
         batch_prices.extend(_price_rows(detail))
+        batch_players.append(player)
+        births[player.id] = _birthday_to_iso(detail.birthday)
         logger.info("biwenger %s [%d/%d] %s", competition, index, total, player.slug)
         if index % batch_size == 0:
             flush()

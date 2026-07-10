@@ -26,6 +26,7 @@ PLAYER_REVIEW_COLUMNS = [
     "biwenger_id",
     "biwenger_name",
     "biwenger_team",
+    "biwenger_birth_date",
     "tm_id",
     "tm_name",
     "tm_club",

@@ -23,7 +23,7 @@ from datetime import UTC, datetime
 
 import pandas as pd
 
-from lfdata.mappings.matcher import player_candidates, team_candidates
+from lfdata.mappings.matcher import birthdate_compatible, player_candidates, team_candidates
 from lfdata.mappings.store import (
     BIWENGER,
     PLAYER_REVIEW_COLUMNS,
@@ -257,7 +257,7 @@ def run_map(storage: Storage, mappings_dir, *, today: str | None = None) -> MapR
     """Regenera candidatos y aplica decisiones; devuelve el resumen."""
     today = today or _today()
     biw_players = _read_curated(
-        storage, "biwenger_players", ["id", "name", "team_id", "competition"]
+        storage, "biwenger_players", ["id", "name", "team_id", "birth_date", "competition"]
     )
     biw_teams = _read_curated(storage, "biwenger_teams", ["id", "name", "competition"])
     tm_players = _read_curated(
@@ -419,6 +419,7 @@ def _map_players(
             if not pd.isna(player.team_id)
             else None
         )
+        biw_birth = "" if pd.isna(player.birth_date) else str(player.birth_date)[:10]
         in_club = [
             c
             for c in (tm_by_canonical.get(canonical_team, []) if canonical_team else [])
@@ -426,17 +427,23 @@ def _map_players(
         ]
         cands = player_candidates(str(player.name), in_club)
         if len(cands) == 1:
-            store.add_player(
-                store.new_player_canonical(),
-                [(BIWENGER, biw_id), (TRANSFERMARKT, cands[0]["id"])],
-                method="auto",
-                date=today,
-            )
-            approved.add(biw_id)
-            taken.add(cands[0]["id"])
+            only = cands[0]
+            if birthdate_compatible(biw_birth, only["birth_date"]):
+                store.add_player(
+                    store.new_player_canonical(),
+                    [(BIWENGER, biw_id), (TRANSFERMARKT, only["id"])],
+                    method="auto",
+                    date=today,
+                )
+                approved.add(biw_id)
+                taken.add(only["id"])
+                continue
+            # Homónimo único en el club pero con fecha discrepante: no se aprueba
+            # solo; va a revisión con ambas fechas como evidencia del desempate.
+            review_rows.append(_player_row(biw_id, player, only, "fecha-discrepante", biw_birth))
             continue
         review_rows += _player_review_rows(
-            store, biw_id, player, canonical_team, cands, tm_all, taken
+            store, biw_id, player, canonical_team, cands, tm_all, taken, biw_birth
         )
 
     store.players_review = _preserve_decisions(
@@ -453,23 +460,25 @@ def _player_review_rows(
     in_club: list[dict],
     tm_all: list[dict],
     taken: set[str],
+    biw_birth: str,
 ) -> list[dict]:
     if len(in_club) > 1:
-        return [_player_row(biw_id, player, c, "varios-en-club") for c in in_club]
+        return [_player_row(biw_id, player, c, "varios-en-club", biw_birth) for c in in_club]
     # Ningún candidato dentro del club: quizá esté cedido o el equipo no se mapeó.
     # Ofrecemos como evidencia los homónimos en cualquier club (regla del dudoso).
     motivo = "equipo-sin-mapear" if canonical_team is None else "fuera-de-club"
     cross = [c for c in player_candidates(str(player.name), tm_all) if c["id"] not in taken]
     if not cross:
-        return [_player_row(biw_id, player, None, "sin-candidato")]
-    return [_player_row(biw_id, player, c, motivo) for c in cross]
+        return [_player_row(biw_id, player, None, "sin-candidato", biw_birth)]
+    return [_player_row(biw_id, player, c, motivo, biw_birth) for c in cross]
 
 
-def _player_row(biw_id: str, player, cand: dict | None, motivo: str) -> dict:
+def _player_row(biw_id: str, player, cand: dict | None, motivo: str, biw_birth: str) -> dict:
     return {
         "biwenger_id": biw_id,
         "biwenger_name": str(player.name),
         "biwenger_team": "" if pd.isna(player.team_id) else str(int(player.team_id)),
+        "biwenger_birth_date": biw_birth,
         "tm_id": cand["id"] if cand else "",
         "tm_name": cand["name"] if cand else "",
         "tm_club": cand["club_name"] if cand else "",

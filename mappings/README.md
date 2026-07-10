@@ -6,9 +6,12 @@ código y se revisa en pull request.
 
 Anclamos la identidad en **Biwenger** (el universo que la plataforma necesita) y
 buscamos su contraparte en **Transfermarkt** por club mapeado + nombre
-normalizado. Biwenger no publica fecha de nacimiento en sus tablas curadas, así
-que el desempate por fecha se hace a mano con la evidencia de Transfermarkt
-(issue #8).
+normalizado. La ingesta de reports rellena la fecha de nacimiento en
+`biwenger_players` desde el detalle por jugador (issue #37): un homónimo único en
+el club solo se aprueba en `auto` si su fecha coincide con la de Transfermarkt o
+falta alguna de las dos; si discrepan, va a revisión con motivo
+`fecha-discrepante` y ambas fechas (`biwenger_birth_date` y `tm_birth_date`) como
+evidencia del desempate.
 
 ## Ficheros
 
