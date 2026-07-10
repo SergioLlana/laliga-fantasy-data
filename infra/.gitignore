@@ -1,0 +1,14 @@
+# Terraform (el lock .terraform.lock.hcl SÍ se versiona)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+
+# Variables locales que puedan contener secretos (los .tfvars versionados van aparte)
+*.auto.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
