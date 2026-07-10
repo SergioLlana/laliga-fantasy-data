@@ -14,7 +14,7 @@ import pytest
 from lfdata.cli import main
 from lfdata.mappings import check_mappings, run_map
 from lfdata.mappings.normalize import name_compatible, normalize, team_compatible
-from lfdata.mappings.store import MappingStore
+from lfdata.mappings.store import MappingIntegrityError, MappingStore
 from lfdata.storage import Storage
 
 
@@ -302,6 +302,131 @@ def test_skip_decision_maps_biwenger_only(storage: Storage, tmp_path: Path) -> N
     assert rows["fuente"].tolist() == ["biwenger"]  # sin fila de Transfermarkt
 
 
+# --- decisiones no aplicables: se conservan y se reportan ---------------------
+
+TWO_WILLIAMS_TM = [
+    {"id": 10, "name": "Iñaki Williams", "club_id": 1, "club_name": "Athletic Bilbao",
+     "birth_date": "1994-06-15", "position": "Right Winger"},
+    {"id": 11, "name": "Nico Williams", "club_id": 1, "club_name": "Athletic Bilbao",
+     "birth_date": "2002-07-12", "position": "Left Winger"},
+]  # fmt: skip
+
+
+def _seed_ambiguous(storage: Storage) -> None:
+    seed(
+        storage,
+        teams=[{"id": 1, "name": "Athletic"}],
+        players=[{"id": 100, "name": "Williams", "team_id": 1}],
+        tm_players=TWO_WILLIAMS_TM,
+    )
+
+
+def _edit_review(mappings: Path, edits: list[tuple[str, str]]) -> None:
+    """Aplica ``(tm_id, decision)`` sobre players-review.csv y lo reescribe."""
+    review = pd.read_csv(mappings / "players-review.csv", dtype=str, keep_default_na=False)
+    for tm_id, value in edits:
+        review.loc[review["tm_id"] == tm_id, "decision"] = value
+    review.to_csv(mappings / "players-review.csv", index=False)
+
+
+def _decisions_column(mappings: Path, tm_id: str) -> str:
+    review = pd.read_csv(mappings / "players-review.csv", dtype=str, keep_default_na=False)
+    return review.loc[review["tm_id"] == tm_id, "decision"].iloc[0]
+
+
+def test_two_yes_decisions_preserved_and_reported(storage: Storage, tmp_path: Path) -> None:
+    mappings = tmp_path / "mappings"
+    _seed_ambiguous(storage)
+    run_map(storage, mappings)
+    _edit_review(mappings, [("10", "y"), ("11", "y")])
+
+    report = run_map(storage, mappings)
+
+    assert report.players_manual == 0
+    assert {u.motivo for u in report.unapplied} == {"varios-y"}
+    assert len(report.unapplied) == 2
+    # El trabajo manual no se borra: ambas decisiones siguen en el fichero.
+    assert _decisions_column(mappings, "10") == "y"
+    assert _decisions_column(mappings, "11") == "y"
+
+
+def test_yes_without_candidate_preserved_and_reported(storage: Storage, tmp_path: Path) -> None:
+    mappings = tmp_path / "mappings"
+    seed(
+        storage,
+        teams=BASIC_TEAMS,
+        players=[{"id": 100, "name": "Fantasma", "team_id": 1}],
+        tm_players=BASIC_TM,
+    )
+    run_map(storage, mappings)  # -> fila sin-candidato, tm_id vacío
+    _edit_review(mappings, [("", "y")])
+
+    report = run_map(storage, mappings)
+
+    assert report.players_manual == 0
+    assert [u.motivo for u in report.unapplied] == ["y-sin-candidato"]
+    assert _decisions_column(mappings, "") == "y"
+
+
+def test_yes_with_skip_preserved_and_reported(storage: Storage, tmp_path: Path) -> None:
+    mappings = tmp_path / "mappings"
+    _seed_ambiguous(storage)
+    run_map(storage, mappings)
+    _edit_review(mappings, [("10", "y"), ("11", "skip")])
+
+    report = run_map(storage, mappings)
+
+    assert report.players_manual == 0
+    assert {u.motivo for u in report.unapplied} == {"y-con-skip"}
+    assert _decisions_column(mappings, "10") == "y"
+    assert _decisions_column(mappings, "11") == "skip"
+
+
+def test_unrecognized_token_preserved_and_reported(storage: Storage, tmp_path: Path) -> None:
+    mappings = tmp_path / "mappings"
+    _seed_ambiguous(storage)
+    run_map(storage, mappings)
+    _edit_review(mappings, [("10", "yep")])  # typo, no reconocido
+
+    report = run_map(storage, mappings)
+
+    assert report.players_manual == 0
+    assert any(u.motivo == "token-no-reconocido" for u in report.unapplied)
+    assert _decisions_column(mappings, "10") == "yep"
+
+
+def test_manual_decision_rejects_taken_tm_id(storage: Storage, tmp_path: Path) -> None:
+    mappings = tmp_path / "mappings"
+    seed(
+        storage,
+        teams=[{"id": 1, "name": "Athletic"}],
+        players=[
+            {"id": 100, "name": "Williams", "team_id": 1},
+            {"id": 101, "name": "Williams", "team_id": 1},
+        ],
+        tm_players=TWO_WILLIAMS_TM,
+    )
+    run_map(storage, mappings)
+
+    # Dos jugadores canónicos apuntan al mismo id de Transfermarkt (10).
+    review = pd.read_csv(mappings / "players-review.csv", dtype=str, keep_default_na=False)
+    review.loc[(review["biwenger_id"] == "100") & (review["tm_id"] == "10"), "decision"] = "y"
+    review.loc[(review["biwenger_id"] == "101") & (review["tm_id"] == "10"), "decision"] = "y"
+    review.to_csv(mappings / "players-review.csv", index=False)
+
+    report = run_map(storage, mappings)
+
+    # Solo uno se promueve; el segundo se rechaza sin duplicar el tm_id 10.
+    assert report.players_manual == 1
+    assert any(u.motivo == "tm-id-ya-tomado" and u.biwenger_id == "101" for u in report.unapplied)
+    store = MappingStore(mappings)
+    store.load()
+    tm10 = store.players[
+        (store.players["fuente"] == "transfermarkt") & (store.players["id_en_fuente"] == "10")
+    ]
+    assert len(tm10) == 1
+
+
 # --- verificación (--check) --------------------------------------------------
 
 
@@ -355,3 +480,117 @@ def test_cli_map_and_check(storage: Storage, tmp_path: Path, capsys) -> None:
 
     assert main(["map", "--check", "--data", data_uri, "--mappings", str(mappings)]) == 0
     assert "tienen mapping" in capsys.readouterr().out
+
+
+# --- integridad de los aprobados ---------------------------------------------
+
+
+def _write_approved(mappings: Path, name: str, rows: list[dict]) -> None:
+    mappings.mkdir(parents=True, exist_ok=True)
+    columns = ["canonical_id", "fuente", "id_en_fuente", "metodo", "fecha"]
+    pd.DataFrame(rows, columns=columns).to_csv(mappings / name, index=False)
+
+
+def test_load_fails_on_duplicate_source_id(tmp_path: Path) -> None:
+    mappings = tmp_path / "mappings"
+    # El mismo id de Transfermarkt (10) en dos identidades canónicas.
+    _write_approved(
+        mappings,
+        "players.csv",
+        [
+            {
+                "canonical_id": "p00001",
+                "fuente": "transfermarkt",
+                "id_en_fuente": "10",
+                "metodo": "manual",
+                "fecha": "2026-07-10",
+            },
+            {
+                "canonical_id": "p00002",
+                "fuente": "transfermarkt",
+                "id_en_fuente": "10",
+                "metodo": "manual",
+                "fecha": "2026-07-10",
+            },
+        ],  # fmt: skip
+    )
+    store = MappingStore(mappings)
+    with pytest.raises(MappingIntegrityError) as excinfo:
+        store.load()
+    assert any("10" in p for p in excinfo.value.problems)
+
+
+def test_load_fails_on_two_source_ids_per_canonical(tmp_path: Path) -> None:
+    mappings = tmp_path / "mappings"
+    _write_approved(
+        mappings,
+        "players.csv",
+        [
+            {
+                "canonical_id": "p00001",
+                "fuente": "transfermarkt",
+                "id_en_fuente": "10",
+                "metodo": "manual",
+                "fecha": "2026-07-10",
+            },
+            {
+                "canonical_id": "p00001",
+                "fuente": "transfermarkt",
+                "id_en_fuente": "11",
+                "metodo": "manual",
+                "fecha": "2026-07-10",
+            },
+        ],  # fmt: skip
+    )
+    store = MappingStore(mappings)
+    with pytest.raises(MappingIntegrityError):
+        store.load()
+
+
+def test_load_fails_on_unrecognizable_canonical_id(tmp_path: Path) -> None:
+    mappings = tmp_path / "mappings"
+    _write_approved(
+        mappings,
+        "players.csv",
+        [
+            {
+                "canonical_id": "xyz",
+                "fuente": "biwenger",
+                "id_en_fuente": "100",
+                "metodo": "manual",
+                "fecha": "2026-07-10",
+            },
+        ],  # fmt: skip
+    )
+    store = MappingStore(mappings)
+    with pytest.raises(MappingIntegrityError):
+        store.load()
+
+
+def test_cli_map_fails_on_broken_integrity(storage: Storage, tmp_path: Path, capsys) -> None:
+    mappings = tmp_path / "mappings"
+    _write_approved(
+        mappings,
+        "players.csv",
+        [
+            {
+                "canonical_id": "p00001",
+                "fuente": "transfermarkt",
+                "id_en_fuente": "10",
+                "metodo": "manual",
+                "fecha": "2026-07-10",
+            },
+            {
+                "canonical_id": "p00002",
+                "fuente": "transfermarkt",
+                "id_en_fuente": "10",
+                "metodo": "manual",
+                "fecha": "2026-07-10",
+            },
+        ],  # fmt: skip
+    )
+    data_uri = storage.base_uri
+    assert main(["map", "--data", data_uri, "--mappings", str(mappings)]) == 1
+    assert "Integridad" in capsys.readouterr().out
+    # --check también falla por integridad, no solo por cobertura.
+    assert main(["map", "--check", "--data", data_uri, "--mappings", str(mappings)]) == 1

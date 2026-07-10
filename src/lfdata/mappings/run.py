@@ -18,7 +18,7 @@ es idempotente: lo ya aprobado se conserva y no se vuelve a proponer.
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import pandas as pd
@@ -26,6 +26,8 @@ import pandas as pd
 from lfdata.mappings.matcher import player_candidates, team_candidates
 from lfdata.mappings.store import (
     BIWENGER,
+    PLAYER_REVIEW_COLUMNS,
+    TEAM_REVIEW_COLUMNS,
     TRANSFERMARKT,
     MappingStore,
 )
@@ -33,6 +35,29 @@ from lfdata.storage import Storage
 
 _YES = frozenset({"y", "yes", "si", "sí", "x", "1", "true", "ok"})
 _SKIP = frozenset({"skip", "none", "no-tm", "biwenger-only", "solo-biwenger"})
+
+
+@dataclass
+class UnappliedDecision:
+    """Una ``decision`` escrita por un humano que no pudo aplicarse, y su motivo.
+
+    Se preserva en el fichero de revisión (no se borra) y se reporta para que el
+    humano la corrija en vez de reescribirla de cero.
+    """
+
+    kind: str  # "jugador" | "equipo"
+    biwenger_id: str
+    biwenger_name: str
+    tm_id: str
+    decision: str
+    motivo: str
+
+    def render(self) -> str:
+        objetivo = self.tm_id or "—"
+        return (
+            f"  {self.kind} biwenger {self.biwenger_id} ({self.biwenger_name}): "
+            f"decision={self.decision!r} tm={objetivo} — {self.motivo}"
+        )
 
 
 @dataclass
@@ -46,6 +71,7 @@ class MapReport:
     players_auto: int = 0
     players_manual: int = 0
     players_review: int = 0
+    unapplied: list[UnappliedDecision] = field(default_factory=list)
 
     @property
     def players_mapped(self) -> int:
@@ -68,6 +94,13 @@ class MapReport:
             f"{self.players_auto} auto, {self.players_manual} manual, "
             f"{self.players_review} en revisión, {self.players_pending} pendientes",
         ]
+        if self.unapplied:
+            lines.append("")
+            lines.append(
+                f"Decisiones no aplicadas ({len(self.unapplied)}) — "
+                "se conservan en el fichero de revisión; corrígelas y re-ejecuta:"
+            )
+            lines += [u.render() for u in self.unapplied]
         return "\n".join(lines)
 
 
@@ -78,6 +111,131 @@ def _decision(value: str) -> str | None:
     if token in _SKIP:
         return "skip"
     return None
+
+
+def _classify_group(marked: list[tuple], tm_id_attr: str, taken: set[str]):
+    """Clasifica las decisiones marcadas de un ``biwenger_id``.
+
+    Devuelve ``(accion, problemas)`` donde ``accion`` es ``("yes", tm_id)``,
+    ``("skip", None)`` o ``None`` si no se puede aplicar; ``problemas`` es la
+    lista de ``(fila, motivo)`` de las decisiones que no se aplican.
+    """
+    yes = [row for row, d in marked if d == "yes"]
+    skip = [row for row, d in marked if d == "skip"]
+    unknown = [row for row, d in marked if d is None]
+
+    if unknown:
+        return None, [(row, "token-no-reconocido") for row, _ in marked]
+    if yes and skip:
+        return None, [(row, "y-con-skip") for row, _ in marked]
+    if len(yes) > 1:
+        return None, [(row, "varios-y") for row in yes]
+    if len(yes) == 1:
+        tm_id = str(getattr(yes[0], tm_id_attr) or "")
+        if not tm_id:
+            return None, [(yes[0], "y-sin-candidato")]
+        if tm_id in taken:
+            return None, [(yes[0], "tm-id-ya-tomado")]
+        return ("yes", tm_id), []
+    return ("skip", None), []
+
+
+def _apply_decisions(
+    review_df: pd.DataFrame,
+    approved: set[str],
+    taken: set[str],
+    *,
+    kind: str,
+    tm_id_attr: str,
+    add_fn,
+    new_canonical_fn,
+    today: str,
+) -> list[UnappliedDecision]:
+    """Promueve las decisiones válidas a aprobados; reporta las que no lo son.
+
+    Las filas de un ``biwenger_id`` con ``decision`` no vacía se clasifican en
+    conjunto: o promueven la identidad (un único ``y`` con candidato libre, o uno
+    o varios ``skip``), o quedan sin aplicar con su motivo.
+    """
+    unapplied: list[UnappliedDecision] = []
+    for biw_id, rows in review_df.groupby("biwenger_id"):
+        biw_id = str(biw_id)
+        if biw_id in approved:
+            continue
+        marked = [
+            (row, _decision(row.decision)) for row in rows.itertuples() if str(row.decision).strip()
+        ]
+        if not marked:
+            continue
+
+        action, problems = _classify_group(marked, tm_id_attr, taken)
+        unapplied += [
+            UnappliedDecision(
+                kind=kind,
+                biwenger_id=biw_id,
+                biwenger_name=str(row.biwenger_name),
+                tm_id=str(getattr(row, tm_id_attr) or ""),
+                decision=str(row.decision),
+                motivo=motivo,
+            )
+            for row, motivo in problems
+        ]
+        if action is None:
+            continue
+
+        verb, tm_id = action
+        if verb == "yes":
+            add_fn(
+                new_canonical_fn(),
+                [(BIWENGER, biw_id), (TRANSFERMARKT, tm_id)],
+                method="manual",
+                date=today,
+            )
+            approved.add(biw_id)
+            taken.add(tm_id)
+        else:  # skip: identidad canónica solo con Biwenger
+            add_fn(new_canonical_fn(), [(BIWENGER, biw_id)], method="manual", date=today)
+            approved.add(biw_id)
+    return unapplied
+
+
+def _preserve_decisions(
+    new_rows: list[dict],
+    old_review: pd.DataFrame,
+    approved: set[str],
+    columns: list[str],
+    key_cols: tuple[str, ...],
+) -> pd.DataFrame:
+    """Regenera el fichero de revisión sin perder ``decision`` escritas a mano.
+
+    Para cada ``biwenger_id`` no promovido a aprobado, conserva el valor original
+    de ``decision``: lo reasigna a la fila regenerada equivalente (misma clave) y,
+    si la fila ya no se regenera (p. ej. su candidato quedó tomado por otro),
+    re-añade la fila antigua tal cual para que el trabajo manual no se borre.
+    """
+    new_df = pd.DataFrame(new_rows, columns=columns)
+    if old_review.empty:
+        return new_df
+
+    kept = old_review[
+        (old_review["decision"].astype(str).str.strip() != "")
+        & (~old_review["biwenger_id"].astype(str).isin(approved))
+    ]
+    if kept.empty:
+        return new_df
+
+    old_by_key = {tuple(str(row[c]) for c in key_cols): row for _, row in kept.iterrows()}
+    records = new_df.to_dict("records")
+    seen = set()
+    for record in records:
+        key = tuple(str(record[c]) for c in key_cols)
+        seen.add(key)
+        if key in old_by_key:
+            record["decision"] = old_by_key[key]["decision"]
+    for key, row in old_by_key.items():
+        if key not in seen:
+            records.append({c: row[c] for c in columns})
+    return pd.DataFrame(records, columns=columns)
 
 
 def _today() -> str:
@@ -111,11 +269,13 @@ def run_map(storage: Storage, mappings_dir, *, today: str | None = None) -> MapR
     store = MappingStore(mappings_dir)
     store.load()
 
-    _map_teams(store, biw_teams, tm_players, today)
-    _map_players(store, biw_players, tm_players, today)
+    unapplied = _map_teams(store, biw_teams, tm_players, today)
+    unapplied += _map_players(store, biw_players, tm_players, today)
 
     store.save()
-    return _report(store, biw_teams, biw_players)
+    report = _report(store, biw_teams, biw_players)
+    report.unapplied = unapplied
+    return report
 
 
 # --- equipos -----------------------------------------------------------------
@@ -137,12 +297,22 @@ def _tm_clubs(tm_players: pd.DataFrame) -> list[dict]:
 
 def _map_teams(
     store: MappingStore, biw_teams: pd.DataFrame, tm_players: pd.DataFrame, today: str
-) -> None:
+) -> list[UnappliedDecision]:
     clubs = _tm_clubs(tm_players)
     approved = store.approved_ids(store.teams, BIWENGER)
     taken = store.approved_ids(store.teams, TRANSFERMARKT)
+    old_review = store.teams_review
 
-    _apply_team_decisions(store, approved, taken, today)
+    unapplied = _apply_decisions(
+        old_review,
+        approved,
+        taken,
+        kind="equipo",
+        tm_id_attr="tm_club_id",
+        add_fn=store.add_team,
+        new_canonical_fn=store.new_team_canonical,
+        today=today,
+    )
 
     review_rows: list[dict] = []
     for team in biw_teams.sort_values(["competition", "id"]).itertuples():
@@ -165,34 +335,10 @@ def _map_teams(
         else:
             review_rows += _team_review_rows(biw_id, team, competition, cands)
 
-    store.teams_review = pd.DataFrame(review_rows, columns=store.teams_review.columns)
-
-
-def _apply_team_decisions(
-    store: MappingStore, approved: set[str], taken: set[str], today: str
-) -> None:
-    for biw_id, rows in store.teams_review.groupby("biwenger_id"):
-        biw_id = str(biw_id)
-        if biw_id in approved:
-            continue
-        decisions = [(row, _decision(row.decision)) for row in rows.itertuples()]
-        chosen = [row for row, d in decisions if d == "yes"]
-        skipped = any(d == "skip" for _, d in decisions)
-        if len(chosen) == 1 and chosen[0].tm_club_id:
-            tm_id = str(chosen[0].tm_club_id)
-            store.add_team(
-                store.new_team_canonical(),
-                [(BIWENGER, biw_id), (TRANSFERMARKT, tm_id)],
-                method="manual",
-                date=today,
-            )
-            approved.add(biw_id)
-            taken.add(tm_id)
-        elif skipped and not chosen:
-            store.add_team(
-                store.new_team_canonical(), [(BIWENGER, biw_id)], method="manual", date=today
-            )
-            approved.add(biw_id)
+    store.teams_review = _preserve_decisions(
+        review_rows, old_review, approved, TEAM_REVIEW_COLUMNS, ("biwenger_id", "tm_club_id")
+    )
+    return unapplied
 
 
 def _team_review_rows(biw_id: str, team, competition: str, cands: list[dict]) -> list[dict]:
@@ -227,7 +373,7 @@ def _team_review_rows(biw_id: str, team, competition: str, cands: list[dict]) ->
 
 def _map_players(
     store: MappingStore, biw_players: pd.DataFrame, tm_players: pd.DataFrame, today: str
-) -> None:
+) -> list[UnappliedDecision]:
     # Club de Transfermarkt -> equipo canónico -> jugadores de ese equipo.
     tm_club_to_canonical = store.canonical_by_source(store.teams, TRANSFERMARKT)
     biw_team_to_canonical = store.canonical_by_source(store.teams, BIWENGER)
@@ -250,8 +396,18 @@ def _map_players(
 
     approved = store.approved_ids(store.players, BIWENGER)
     taken = store.approved_ids(store.players, TRANSFERMARKT)
+    old_review = store.players_review
 
-    _apply_player_decisions(store, approved, taken, today)
+    unapplied = _apply_decisions(
+        old_review,
+        approved,
+        taken,
+        kind="jugador",
+        tm_id_attr="tm_id",
+        add_fn=store.add_player,
+        new_canonical_fn=store.new_player_canonical,
+        today=today,
+    )
 
     review_rows: list[dict] = []
     for player in biw_players.sort_values(["competition", "id"]).itertuples():
@@ -283,34 +439,10 @@ def _map_players(
             store, biw_id, player, canonical_team, cands, tm_all, taken
         )
 
-    store.players_review = pd.DataFrame(review_rows, columns=store.players_review.columns)
-
-
-def _apply_player_decisions(
-    store: MappingStore, approved: set[str], taken: set[str], today: str
-) -> None:
-    for biw_id, rows in store.players_review.groupby("biwenger_id"):
-        biw_id = str(biw_id)
-        if biw_id in approved:
-            continue
-        decisions = [(row, _decision(row.decision)) for row in rows.itertuples()]
-        chosen = [row for row, d in decisions if d == "yes"]
-        skipped = any(d == "skip" for _, d in decisions)
-        if len(chosen) == 1 and chosen[0].tm_id:
-            tm_id = str(chosen[0].tm_id)
-            store.add_player(
-                store.new_player_canonical(),
-                [(BIWENGER, biw_id), (TRANSFERMARKT, tm_id)],
-                method="manual",
-                date=today,
-            )
-            approved.add(biw_id)
-            taken.add(tm_id)
-        elif skipped and not chosen:
-            store.add_player(
-                store.new_player_canonical(), [(BIWENGER, biw_id)], method="manual", date=today
-            )
-            approved.add(biw_id)
+    store.players_review = _preserve_decisions(
+        review_rows, old_review, approved, PLAYER_REVIEW_COLUMNS, ("biwenger_id", "tm_id")
+    )
+    return unapplied
 
 
 def _player_review_rows(

@@ -50,6 +50,54 @@ TRANSFERMARKT = "transfermarkt"
 
 _ID_SUFFIX = re.compile(r"(\d+)$")
 
+# Formato reconocible del canonical_id propio (ADR 0001): prefijo + dígitos.
+_PLAYER_CANONICAL = re.compile(r"^p\d+$")
+_TEAM_CANONICAL = re.compile(r"^t\d+$")
+
+
+class MappingIntegrityError(Exception):
+    """Los ficheros de aprobados violan la relación del dominio (ADR 0001).
+
+    Un **Jugador/Equipo canónico** tiene como máximo un **Mapping** por
+    **Fuente**. Un CSV editado a mano que rompa esto (mismo id de fuente en dos
+    identidades, dos ids de la misma fuente bajo un canónico, o un canonical_id
+    con formato irreconocible) hace fallar el comando señalando las filas.
+    """
+
+    def __init__(self, problems: list[str]) -> None:
+        self.problems = list(problems)
+        super().__init__("\n".join(self.problems))
+
+
+def _integrity_problems(df: pd.DataFrame, fichero: str, pattern: re.Pattern[str]) -> list[str]:
+    """Problemas de integridad de un fichero de aprobados; vacío = correcto."""
+    problems: list[str] = []
+    if df.empty:
+        return problems
+
+    # (fuente, id_en_fuente) único en todo el fichero: un id de fuente no puede
+    # apuntar a dos identidades canónicas.
+    dup_source = df[df.duplicated(subset=["fuente", "id_en_fuente"], keep=False)]
+    for (fuente, source_id), group in dup_source.groupby(["fuente", "id_en_fuente"]):
+        canonicals = ", ".join(sorted(set(group["canonical_id"])))
+        problems.append(
+            f"{fichero}: ({fuente}, {source_id}) aparece en varias identidades canónicas: "
+            f"{canonicals}"
+        )
+
+    # Cada canonical_id, como máximo una fila por fuente.
+    dup_canonical = df[df.duplicated(subset=["canonical_id", "fuente"], keep=False)]
+    for (canonical_id, fuente), group in dup_canonical.groupby(["canonical_id", "fuente"]):
+        source_ids = ", ".join(sorted(group["id_en_fuente"]))
+        problems.append(f"{fichero}: {canonical_id} tiene varios ids en {fuente}: {source_ids}")
+
+    # Formato del canonical_id reconocible.
+    bad = sorted({str(c) for c in df["canonical_id"] if not pattern.match(str(c))})
+    for canonical_id in bad:
+        problems.append(f"{fichero}: canonical_id con formato no reconocible: {canonical_id!r}")
+
+    return problems
+
 
 def _read_csv(path: Path, columns: list[str]) -> pd.DataFrame:
     if not path.exists():
@@ -78,8 +126,17 @@ class MappingStore:
         self.teams = _read_csv(self.root / "teams.csv", APPROVED_COLUMNS)
         self.players_review = _read_csv(self.root / "players-review.csv", PLAYER_REVIEW_COLUMNS)
         self.teams_review = _read_csv(self.root / "teams-review.csv", TEAM_REVIEW_COLUMNS)
+        self.validate()
+
+    def validate(self) -> None:
+        """Falla si los aprobados violan la integridad del dominio (ADR 0001)."""
+        problems = _integrity_problems(self.players, "players.csv", _PLAYER_CANONICAL)
+        problems += _integrity_problems(self.teams, "teams.csv", _TEAM_CANONICAL)
+        if problems:
+            raise MappingIntegrityError(problems)
 
     def save(self) -> None:
+        self.validate()
         self.root.mkdir(parents=True, exist_ok=True)
         self._save(self.players.sort_values(["canonical_id", "fuente"]), "players.csv")
         self._save(self.teams.sort_values(["canonical_id", "fuente"]), "teams.csv")
