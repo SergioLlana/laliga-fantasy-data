@@ -14,11 +14,13 @@ mapping a IDs canónicos es un paso posterior):
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 import pandas as pd
 
-from lfdata.sources.http import HttpTransport, scrapeops_proxy_from_env
+from lfdata.sources.http import HttpTransport, SourceHTTPError, scrapeops_proxy_from_env
+from lfdata.sources.ingestion import IngestResult, PlayerFailure
 from lfdata.sources.transfermarkt.client import PROXY_ENABLED, WAIT_SECONDS, TransfermarktClient
 from lfdata.sources.transfermarkt.parse import (
     availability_rows,
@@ -26,6 +28,8 @@ from lfdata.sources.transfermarkt.parse import (
     transfer_rows,
 )
 from lfdata.storage import Storage
+
+logger = logging.getLogger(__name__)
 
 # Temporada por defecto: saison_id de Transfermarkt es el año de inicio
 # (2025 = temporada 2025-26).
@@ -50,7 +54,7 @@ def ingest_squads(
     transport: HttpTransport | None = None,
     max_clubs: int | None = None,
     since_days: int | None = None,
-) -> dict[str, int]:
+) -> IngestResult:
     """Descarga la competición y publica las cinco tablas curadas, club a club.
 
     Cada club se escribe con ``upsert_table`` en cuanto se termina de recorrer,
@@ -58,11 +62,17 @@ def ingest_squads(
     escritos. Correr la competición entera equivale a un refresh completo; un run
     parcial (``max_clubs``) refresca solo esos jugadores sin tocar al resto.
 
+    Un jugador que la fuente ya no sirve (p. ej. 404 de una baja) se registra
+    como fallo y se salta: sigue contando como visto en la plantilla, así que no
+    se le retira. Un refresh completo (sin ``max_clubs``) retira de
+    ``transfermarkt_players`` a quien ya no aparezca en ninguna plantilla.
+
     ``max_clubs`` limita el número de clubes recorridos (útil para una primera
     prueba real, dado que el recorrido completo son miles de peticiones a 4 s).
     ``since_days`` salta a los jugadores cuya descarga en ``raw/`` sea más
     reciente que ese número de días, para reanudar un backfill sin re-scrapear lo
-    ya bajado. Devuelve el número de filas escritas por tabla.
+    ya bajado; esos jugadores siguen contando como vistos. Devuelve las filas
+    escritas por tabla y los jugadores fallidos.
     """
     transport = transport or HttpTransport(
         wait_seconds=WAIT_SECONDS,
@@ -71,26 +81,41 @@ def ingest_squads(
     client = TransfermarktClient(transport, storage.raw)
 
     clubs = client.fetch_competition_clubs(competition, season=season)
+    full_refresh = max_clubs is None
     if max_clubs is not None:
         clubs = clubs[:max_clubs]
 
     partition = {"competition": competition}
-    totals = dict.fromkeys(_TABLE_KEYS, 0)
+    result = IngestResult(rows=dict.fromkeys(_TABLE_KEYS, 0))
+    seen_player_ids: set[int] = set()
 
-    for club in clubs:
+    for club_index, club in enumerate(clubs, start=1):
+        logger.info(
+            "transfermarkt %s [%d/%d] club %s (%d)",
+            competition,
+            club_index,
+            len(clubs),
+            club.name,
+            club.id,
+        )
         player_records: list[dict] = []
         value_records: list[dict] = []
         transfer_records: list[dict] = []
         availability_records: list[dict] = []
         injury_records: list[dict] = []
+        downloaded = skipped = failed = 0
 
         for member in client.fetch_squad(club.id, season=season):
             player_id = member.player_id
+            seen_player_ids.add(player_id)  # visto en plantilla aunque se salte o falle
             if since_days is not None and _scraped_within(storage, player_id, since_days):
+                skipped += 1
                 continue
-            profile = client.fetch_player_profile(player_id, slug=member.slug)
-            player_records.append(
-                {
+            try:
+                # Se acumula en locales y solo se vuelca al club si el jugador
+                # se descarga entero: un 404 a mitad no deja filas parciales.
+                profile = client.fetch_player_profile(player_id, slug=member.slug)
+                player = {
                     "id": player_id,
                     "slug": member.slug,
                     "name": profile.name or member.name,
@@ -100,22 +125,46 @@ def ingest_squads(
                     "club_id": club.id,
                     "club_name": club.name,
                 }
-            )
-            value_records += market_value_rows(
-                client.fetch_market_value(player_id), player_id=player_id
-            )
-            transfer_records += transfer_rows(
-                client.fetch_transfers(player_id), player_id=player_id
-            )
-            availability_records += availability_rows(
-                client.fetch_performance(player_id), player_id=player_id
-            )
-            injury_records += [
-                _injury_record(injury)
-                for injury in client.fetch_injuries(player_id, slug=member.slug)
-            ]
+                values = market_value_rows(
+                    client.fetch_market_value(player_id), player_id=player_id
+                )
+                transfers = transfer_rows(client.fetch_transfers(player_id), player_id=player_id)
+                availability = availability_rows(
+                    client.fetch_performance(player_id), player_id=player_id
+                )
+                injuries = [
+                    _injury_record(injury)
+                    for injury in client.fetch_injuries(player_id, slug=member.slug)
+                ]
+            except SourceHTTPError as error:
+                failed += 1
+                result.failures.append(PlayerFailure(member.slug, error.url, error.status))
+                logger.warning(
+                    "transfermarkt %s %s (%d): HTTP %d, saltado",
+                    competition,
+                    member.slug,
+                    player_id,
+                    error.status,
+                )
+                continue
 
-        if not player_records:  # club con todos los jugadores saltados
+            player_records.append(player)
+            value_records += values
+            transfer_records += transfers
+            availability_records += availability
+            injury_records += injuries
+            downloaded += 1
+
+        logger.info(
+            "transfermarkt %s club %s: %d descargados, %d saltados, %d fallidos",
+            competition,
+            club.name,
+            downloaded,
+            skipped,
+            failed,
+        )
+
+        if not player_records:  # club con todos los jugadores saltados o fallidos
             continue
 
         frames = {
@@ -127,9 +176,26 @@ def ingest_squads(
         }
         for table, frame in frames.items():
             storage.curated.upsert_table(table, frame, key=_TABLE_KEYS[table], partition=partition)
-            totals[table] += len(frame)
+            result.rows[table] += len(frame)
 
-    return totals
+    if full_refresh:
+        removed = storage.curated.retain_keys(
+            "transfermarkt_players", seen_player_ids, key="id", partition=partition
+        )
+        if removed:
+            logger.info(
+                "transfermarkt %s: %d jugadores retirados (ya no en ninguna plantilla)",
+                competition,
+                removed,
+            )
+
+    logger.info(
+        "transfermarkt %s: %d jugadores curados, %d fallidos",
+        competition,
+        result.rows["transfermarkt_players"],
+        len(result.failures),
+    )
+    return result
 
 
 def _scraped_within(storage: Storage, player_id: int, since_days: int) -> bool:

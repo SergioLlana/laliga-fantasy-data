@@ -133,6 +133,30 @@ class CuratedStore:
             combined = incoming
         return self.write_table(table, combined, partition=partition)
 
+    def retain_keys(
+        self,
+        table: str,
+        keep: set,
+        *,
+        key: str = "id",
+        partition: Mapping[str, str] | None = None,
+    ) -> int:
+        """Reescribe la partición conservando solo las filas cuyo ``key`` esté en ``keep``.
+
+        Sirve al refresh completo: tras recorrer la competición entera, retira de
+        la tabla a quien ya no aparece en ninguna plantilla. Devuelve cuántas
+        filas se eliminaron; sobre una partición inexistente no hace nada.
+        """
+        path = self._backend.root / self._table_key(table, partition)
+        if not path.exists():
+            return 0
+        existing = pd.read_parquet(path)
+        kept = existing[existing[key].isin(keep)]
+        removed = len(existing) - len(kept)
+        if removed:
+            self.write_table(table, kept, partition=partition)
+        return removed
+
     @staticmethod
     def _table_key(table: str, partition: Mapping[str, str] | None) -> str:
         if partition:

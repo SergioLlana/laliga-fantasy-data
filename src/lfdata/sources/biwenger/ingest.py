@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 
 import pandas as pd
 
 from lfdata.sources.biwenger.client import PROXY_ENABLED, WAIT_SECONDS, BiwengerClient
 from lfdata.sources.biwenger.models import PlayerDetail
-from lfdata.sources.http import HttpTransport, scrapeops_proxy_from_env
+from lfdata.sources.http import HttpTransport, SourceHTTPError, scrapeops_proxy_from_env
+from lfdata.sources.ingestion import IngestResult, PlayerFailure
 from lfdata.storage import Storage
+
+logger = logging.getLogger(__name__)
 
 # Los cinco sistemas de puntuación de Biwenger, por id de sistema.
 POINT_SYSTEMS = {
@@ -21,13 +25,17 @@ POINT_SYSTEMS = {
 }
 POINT_COLUMNS = list(POINT_SYSTEMS.values())
 
+# Los reports se escriben por lotes de este tamaño (en jugadores): un fallo tras
+# el jugador N conserva en curated todo lote ya volcado, en vez de tirar el run.
+REPORTS_BATCH_SIZE = 25
+
 
 def ingest_squad(
     storage: Storage,
     competition: str,
     *,
     transport: HttpTransport | None = None,
-) -> dict[str, int]:
+) -> IngestResult:
     """Descarga la plantilla y publica biwenger_players y biwenger_teams.
 
     Devuelve el número de filas escritas por tabla.
@@ -58,7 +66,13 @@ def ingest_squad(
     partition = {"competition": competition}
     storage.curated.write_table("biwenger_players", players, partition=partition)
     storage.curated.write_table("biwenger_teams", teams, partition=partition)
-    return {"biwenger_players": len(players), "biwenger_teams": len(teams)}
+    logger.info(
+        "biwenger plantilla %s: %d jugadores, %d equipos",
+        competition,
+        len(players),
+        len(teams),
+    )
+    return IngestResult(rows={"biwenger_players": len(players), "biwenger_teams": len(teams)})
 
 
 def _date_from_biwenger(stamp: int) -> date:
@@ -98,36 +112,10 @@ def _price_rows(detail: PlayerDetail) -> list[dict]:
     ]
 
 
-def ingest_reports(
-    storage: Storage,
-    competition: str,
-    season: str,
-    *,
-    transport: HttpTransport | None = None,
-) -> dict[str, int]:
-    """Publica fantasy_points y biwenger_prices de una competición y temporada.
-
-    Recorre todos los jugadores de la plantilla y descarga su detalle. La
-    escritura reemplaza la partición (competition, season) por completo, de modo
-    que reejecutar el comando no duplica filas. Devuelve filas escritas por tabla.
-    """
-    transport = transport or HttpTransport(
-        wait_seconds=WAIT_SECONDS,
-        proxy=scrapeops_proxy_from_env(enabled=PROXY_ENABLED),
-    )
-    client = BiwengerClient(transport, storage.raw)
-    data = client.fetch_competition_data(competition).data
-
-    points_rows: list[dict] = []
-    price_rows: list[dict] = []
-    for player in data.players.values():
-        detail = client.fetch_player_reports(competition, player.slug, season).data
-        points_rows.extend(_points_rows(detail))
-        price_rows.extend(_price_rows(detail))
-
+def _points_frame(rows: list[dict]) -> pd.DataFrame:
     nullable_ints = ["match_id", "round_id", "minutes", "home_score", "away_score", *POINT_COLUMNS]
-    points = pd.DataFrame(
-        points_rows,
+    return pd.DataFrame(
+        rows,
         columns=[
             "player_id",
             "match_id",
@@ -141,9 +129,83 @@ def ingest_reports(
             "result",
         ],
     ).astype(dict.fromkeys(nullable_ints, "Int64"))
-    prices = pd.DataFrame(price_rows, columns=["player_id", "date", "price"])
+
+
+def _prices_frame(rows: list[dict]) -> pd.DataFrame:
+    return pd.DataFrame(rows, columns=["player_id", "date", "price"])
+
+
+def ingest_reports(
+    storage: Storage,
+    competition: str,
+    season: str,
+    *,
+    transport: HttpTransport | None = None,
+    batch_size: int = REPORTS_BATCH_SIZE,
+) -> IngestResult:
+    """Publica fantasy_points y biwenger_prices de una competición y temporada.
+
+    Recorre todos los jugadores de la plantilla y descarga su detalle. Las filas
+    se vuelcan por lotes con ``upsert_table`` (clave ``player_id``) durante el
+    recorrido, de modo que un fallo a mitad conserva en curated todo lo ya
+    descargado y reejecutar no duplica. Un jugador que la fuente ya no sirve (404)
+    se registra como fallo y se salta sin abortar el run. Devuelve las filas
+    escritas por tabla y los jugadores fallidos.
+    """
+    transport = transport or HttpTransport(
+        wait_seconds=WAIT_SECONDS,
+        proxy=scrapeops_proxy_from_env(enabled=PROXY_ENABLED),
+    )
+    client = BiwengerClient(transport, storage.raw)
+    data = client.fetch_competition_data(competition).data
 
     partition = {"competition": competition, "season": season}
-    storage.curated.write_table("fantasy_points", points, partition=partition)
-    storage.curated.write_table("biwenger_prices", prices, partition=partition)
-    return {"fantasy_points": len(points), "biwenger_prices": len(prices)}
+    result = IngestResult(rows={"fantasy_points": 0, "biwenger_prices": 0})
+    total = len(data.players)
+    batch_points: list[dict] = []
+    batch_prices: list[dict] = []
+
+    def flush() -> None:
+        if not batch_points and not batch_prices:
+            return
+        storage.curated.upsert_table(
+            "fantasy_points", _points_frame(batch_points), key="player_id", partition=partition
+        )
+        storage.curated.upsert_table(
+            "biwenger_prices", _prices_frame(batch_prices), key="player_id", partition=partition
+        )
+        result.rows["fantasy_points"] += len(batch_points)
+        result.rows["biwenger_prices"] += len(batch_prices)
+        batch_points.clear()
+        batch_prices.clear()
+
+    for index, player in enumerate(data.players.values(), start=1):
+        try:
+            detail = client.fetch_player_reports(competition, player.slug, season).data
+        except SourceHTTPError as error:
+            result.failures.append(PlayerFailure(player.slug, error.url, error.status))
+            logger.warning(
+                "biwenger %s [%d/%d] %s: HTTP %d, saltado",
+                competition,
+                index,
+                total,
+                player.slug,
+                error.status,
+            )
+            continue
+        batch_points.extend(_points_rows(detail))
+        batch_prices.extend(_price_rows(detail))
+        logger.info("biwenger %s [%d/%d] %s", competition, index, total, player.slug)
+        if index % batch_size == 0:
+            flush()
+    flush()
+
+    logger.info(
+        "biwenger reports %s %s: %d filas de puntos, %d de precios, %d fallidos",
+        competition,
+        season,
+        result.rows["fantasy_points"],
+        result.rows["biwenger_prices"],
+        len(result.failures),
+    )
+    return result

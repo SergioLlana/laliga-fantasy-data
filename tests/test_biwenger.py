@@ -13,6 +13,7 @@ from lfdata.sources.biwenger import (
     ingest_reports,
     ingest_squad,
 )
+from lfdata.sources.http import SourceHTTPError
 from lfdata.storage import Storage
 
 FIXTURES = Path(__file__).parent / "fixtures" / "biwenger"
@@ -117,8 +118,9 @@ def test_unknown_competition_rejected(storage: Storage) -> None:
 
 
 def test_ingest_squad_writes_curated_tables(storage: Storage, tmp_path: Path) -> None:
-    rows = ingest_squad(storage, "la-liga", transport=FakeTransport(FIXTURE.read_bytes()))
-    assert rows == {"biwenger_players": 9, "biwenger_teams": 4}
+    result = ingest_squad(storage, "la-liga", transport=FakeTransport(FIXTURE.read_bytes()))
+    assert result.rows == {"biwenger_players": 9, "biwenger_teams": 4}
+    assert result.failures == []
 
     parquet = tmp_path / "curated" / "biwenger_players" / "competition=la-liga" / "data.parquet"
     assert len(pd.read_parquet(parquet)) == 9
@@ -195,8 +197,8 @@ def test_player_reports_raw_written_before_interpreting(storage: Storage, tmp_pa
 
 def test_ingest_reports_writes_both_tables(storage: Storage, tmp_path: Path) -> None:
     transport = RoutingTransport(_competition_payload("alex-fores"), PLAYER_LA_LIGA.read_bytes())
-    rows = ingest_reports(storage, "la-liga", "2026", transport=transport)
-    assert rows == {"fantasy_points": 3, "biwenger_prices": 4}
+    result = ingest_reports(storage, "la-liga", "2026", transport=transport)
+    assert result.rows == {"fantasy_points": 3, "biwenger_prices": 4}
 
     points = storage.curated.read_table("fantasy_points")
     assert {
@@ -257,6 +259,97 @@ def test_ingest_reports_is_idempotent(storage: Storage) -> None:
     # La partición (competition, season) se reescribe entera: sin duplicados.
     assert len(storage.curated.read_table("fantasy_points")) == 3
     assert len(storage.curated.read_table("biwenger_prices")) == 4
+
+
+# --- resiliencia: un fallo por jugador no aborta el run (#36) ---------------
+
+
+class Fail404OnPlayerTransport:
+    """Plantilla y detalle normales, salvo un 404 en el slug indicado."""
+
+    def __init__(self, competition: bytes, player: bytes, fail_slug: str) -> None:
+        self.competition = competition
+        self.player = player
+        self.fail_slug = fail_slug
+        self.urls: list[str] = []
+
+    def get(self, url, params=None) -> bytes:
+        self.urls.append(url)
+        if "/players/" not in url:
+            return self.competition
+        if url.endswith(f"/{self.fail_slug}"):
+            raise SourceHTTPError(url, 404)
+        return self.player
+
+
+class FailHardOnSecondPlayer:
+    """Devuelve el detalle del primer jugador y revienta (no-HTTP) en el segundo."""
+
+    def __init__(self, competition: bytes, player: bytes) -> None:
+        self.competition = competition
+        self.player = player
+        self.player_calls = 0
+
+    def get(self, url, params=None) -> bytes:
+        if "/players/" not in url:
+            return self.competition
+        self.player_calls += 1
+        if self.player_calls > 1:
+            raise RuntimeError("red caída a mitad de run")
+        return self.player
+
+
+def test_ingest_reports_404_skips_player_and_curates_rest(storage: Storage) -> None:
+    transport = Fail404OnPlayerTransport(
+        _competition_payload("alex-fores", "baja"), PLAYER_LA_LIGA.read_bytes(), "baja"
+    )
+    result = ingest_reports(storage, "la-liga", "2026", transport=transport)
+
+    # Solo alex-fores se curó; "baja" quedó como fallo, no abortó el run.
+    assert result.rows == {"fantasy_points": 3, "biwenger_prices": 4}
+    assert len(result.failures) == 1
+    assert result.failures[0].player == "baja"
+    assert result.failures[0].status == 404
+    assert len(storage.curated.read_table("fantasy_points")) == 3
+
+
+def test_ingest_reports_incremental_preserves_progress_on_crash(storage: Storage) -> None:
+    transport = FailHardOnSecondPlayer(
+        _competition_payload("alex-fores", "otro"), PLAYER_LA_LIGA.read_bytes()
+    )
+    with pytest.raises(RuntimeError, match="red caída"):
+        ingest_reports(storage, "la-liga", "2026", transport=transport, batch_size=1)
+
+    # El primer jugador se volcó por lote antes de que el segundo reventara.
+    assert len(storage.curated.read_table("fantasy_points")) == 3
+    assert len(storage.curated.read_table("biwenger_prices")) == 4
+
+
+def test_cli_ingest_reports_404_exit_code(tmp_path: Path, monkeypatch, capsys) -> None:
+    def fake_get(self, url, params=None):
+        if "/players/" not in url:
+            return _competition_payload("alex-fores", "baja")
+        if url.endswith("/baja"):
+            raise SourceHTTPError(url, 404)
+        return PLAYER_LA_LIGA.read_bytes()
+
+    monkeypatch.setattr("lfdata.sources.http.HttpTransport.get", fake_get)
+    exit_code = main(
+        [
+            "ingest",
+            "biwenger",
+            "--competition",
+            "la-liga",
+            "--season",
+            "2026",
+            "--data",
+            f"file://{tmp_path}",
+        ]
+    )
+    assert exit_code == 1  # hubo un fallo
+    out = capsys.readouterr().out
+    assert "1 jugadores fallaron" in out
+    assert "baja" in out
 
 
 def test_cli_ingest_with_season_adds_reports(tmp_path: Path, monkeypatch, capsys) -> None:
