@@ -43,6 +43,15 @@ Ficheros versionados en git, bajo `mappings/`:
 
 El comando `lfdata map` regenera candidatos y aplica decisiones; `lfdata map --check` falla si hay filas de datos sin mapping (para CI y pipeline).
 
+> **Estado (issue #8):** el matching está implementado (`lfdata.mappings`,
+> `lfdata map [--check]`). Ancla en Biwenger y busca contraparte en Transfermarkt
+> **por club mapeado + nombre normalizado**: Biwenger no expone fecha de
+> nacimiento en sus tablas curadas (solo el detalle por jugador), así que el
+> desempate por fecha se hace a mano con la evidencia de Transfermarkt en los
+> ficheros de revisión, en vez de automáticamente. Equipos primero, luego
+> jugadores dentro del club ya mapeado. Los cuatro ficheros (`players.csv`,
+> `teams.csv` y sus `-review.csv`) viven en `mappings/`, y `--check` está en CI.
+
 Lección del experimento Forés: el club del perfil es "dueño actual", no "dónde jugó" — el matching por club usa el club en la fecha del dato (los traspasos de Transfermarkt dan esa línea temporal), no el club actual.
 
 ### Tablas curadas que produce este paso

@@ -21,3 +21,5 @@ jobs:
           uv run ruff format --check .
       - name: Tests
         run: uv run pytest
+      - name: Mappings al día
+        run: uv run lfdata map --check

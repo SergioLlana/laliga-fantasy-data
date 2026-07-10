@@ -10,6 +10,7 @@ from lfdata import __version__
 from lfdata.sources.transfermarkt import DEFAULT_SEASON
 
 DEFAULT_DATA_URI = "file://./data"
+DEFAULT_MAPPINGS_DIR = "mappings"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -75,6 +76,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     transfermarkt.set_defaults(func=_cmd_ingest_transfermarkt)
 
+    mapper = subparsers.add_parser(
+        "map",
+        help="Genera y aplica los mappings Biwenger↔Transfermarkt (IDs canónicos)",
+    )
+    mapper.add_argument(
+        "--check",
+        action="store_true",
+        help="No escribe: falla si hay datos de Biwenger sin mapping (CI y pipeline)",
+    )
+    mapper.add_argument(
+        "--data",
+        default=os.environ.get("LFDATA_DATA", DEFAULT_DATA_URI),
+        help=f"URI base del almacenamiento (por defecto {DEFAULT_DATA_URI} o $LFDATA_DATA)",
+    )
+    mapper.add_argument(
+        "--mappings",
+        default=DEFAULT_MAPPINGS_DIR,
+        help=f"Directorio de los ficheros de mappings (por defecto {DEFAULT_MAPPINGS_DIR}/)",
+    )
+    mapper.set_defaults(func=_cmd_map)
+
     return parser
 
 
@@ -105,6 +127,29 @@ def _cmd_ingest_transfermarkt(args: argparse.Namespace) -> int:
     )
     for table, count in rows.items():
         print(f"{table}: {count} filas ({args.competition}) -> {args.data}")
+    return 0
+
+
+def _cmd_map(args: argparse.Namespace) -> int:
+    from lfdata.mappings import check_mappings, run_map
+    from lfdata.storage import Storage
+
+    storage = Storage(args.data)
+    if args.check:
+        problems = check_mappings(storage, args.mappings)
+        for problem in problems:
+            print(problem)
+        if problems:
+            print(
+                f"\n{len(problems)} filas sin mapping. Ejecuta `lfdata map` y revisa los dudosos."
+            )
+            return 1
+        print("Todos los jugadores y equipos de Biwenger tienen mapping.")
+        return 0
+
+    report = run_map(storage, args.mappings)
+    print(report.render())
+    print(f"Mappings escritos en {args.mappings}/")
     return 0
 
 
