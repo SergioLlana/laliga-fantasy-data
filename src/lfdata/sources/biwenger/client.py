@@ -8,7 +8,11 @@ from __future__ import annotations
 
 from pydantic import ValidationError
 
-from lfdata.sources.biwenger.models import CompetitionDataResponse, PlayerDetailResponse
+from lfdata.sources.biwenger.models import (
+    CompetitionDataResponse,
+    PlayerDetailResponse,
+    RoundResponse,
+)
 from lfdata.sources.http import HttpTransport
 from lfdata.storage import RawStore
 
@@ -64,6 +68,29 @@ class BiwengerClient:
         )
         try:
             return PlayerDetailResponse.model_validate_json(payload)
+        except ValidationError as error:
+            raise SourceFormatError(
+                f"Biwenger cambió la forma de {url}; la respuesta cruda quedó en raw/. "
+                f"Detalle: {error}"
+            ) from error
+
+    def fetch_round(self, competition: str, round_id: int, score: int) -> RoundResponse:
+        """Jornada completa bajo el sistema ``score``: partidos y puntos por jugador.
+
+        Devuelve a **todos** los jugadores que puntuaron en la jornada, incluidos
+        los que ya dejaron la competición (cuyo detalle por jugador da 404). La
+        respuesta trae además ``season.rounds`` con el catálogo de jornadas de esa
+        temporada, del que se descubren los ids sin lista manual.
+        """
+        if competition not in COMPETITIONS:
+            raise ValueError(f"Competición desconocida: {competition!r} (usa {COMPETITIONS})")
+        url = f"{API_BASE}/rounds/{competition}/{round_id}"
+        payload = self._transport.get(url, params={"score": score})
+        self._raw_store.save(
+            "biwenger", "rounds", f"{competition}-{round_id}-score{score}", payload
+        )
+        try:
+            return RoundResponse.model_validate_json(payload)
         except ValidationError as error:
             raise SourceFormatError(
                 f"Biwenger cambió la forma de {url}; la respuesta cruda quedó en raw/. "

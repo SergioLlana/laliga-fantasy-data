@@ -9,7 +9,7 @@ from datetime import date
 import pandas as pd
 
 from lfdata.sources.biwenger.client import PROXY_OVERFLOW, WAIT_SECONDS, BiwengerClient
-from lfdata.sources.biwenger.models import Player, PlayerDetail
+from lfdata.sources.biwenger.models import Player, PlayerDetail, RoundData
 from lfdata.sources.http import HttpTransport, SourceHTTPError, scrapeops_proxy_from_env
 from lfdata.sources.ingestion import IngestResult, PlayerFailure
 from lfdata.storage import Storage
@@ -279,5 +279,217 @@ def ingest_reports(
         result.rows["biwenger_prices"],
         len(result.failures),
         points_without_stats,
+    )
+    return result
+
+
+# --- Rounds: puntos por jornada de todos los jugadores, sin sesgo (#51) ------
+#
+# El detalle por jugador solo cubre a los que siguen en la competición (los que
+# se fueron dan 404). El endpoint de jornada, en cambio, lista a todos los que
+# puntuaron esa jornada —incluidos los que ya no están—, así que da un histórico
+# sin sesgo de supervivencia. Son cinco peticiones por jornada (una por sistema
+# de puntuación) que se combinan en una fila por jugador-partido con los cinco
+# sistemas como columnas, misma forma que ``fantasy_points`` pero sin minutos ni
+# nota (eso lo aportan el detalle por jugador o SofaScore).
+
+_ROUND_POINTS_COLUMNS = [
+    "player_id",
+    "team_id",
+    "match_id",
+    "round_id",
+    *POINT_COLUMNS,
+    "home",
+    "home_score",
+    "away_score",
+    "result",
+]
+
+
+class RoundDiscoveryError(Exception):
+    """No se pudo descubrir ninguna jornada de la temporada pedida.
+
+    Ningún jugador de la plantilla actual sirvió detalle para esa temporada (los
+    veteranos son la vía para sembrar el primer ``round_id``), así que no hay de
+    dónde sacar el catálogo de jornadas.
+    """
+
+
+def _discover_seed_round(
+    client: BiwengerClient,
+    competition: str,
+    season: str,
+    players: Iterable[Player],
+) -> int | None:
+    """Primer ``round_id`` de la temporada, tomado del detalle de un veterano.
+
+    Recorre la plantilla actual pidiendo el detalle de cada jugador para la
+    temporada pedida. Un jugador que no jugó esa temporada da 404 (baja) o vuelve
+    sin reports (fichaje posterior): se salta. El primero con reports aporta un
+    ``round_id`` de la temporada; con él, la respuesta de la jornada trae el
+    catálogo completo (``season.rounds``), sin lista manual. ``None`` si ninguno
+    sirve.
+    """
+    for player in players:
+        try:
+            detail = client.fetch_player_reports(competition, player.slug, season).data
+        except SourceHTTPError:
+            continue
+        for report in detail.reports:
+            return report.match.round.id
+    return None
+
+
+def _accumulate_round(
+    rows: dict[tuple[int, int], dict], round_data: RoundData, column: str
+) -> None:
+    """Vuelca en ``rows`` los puntos del sistema ``column`` de una jornada.
+
+    Acumula la unión de jugadores de todas las peticiones (no solo la última): un
+    sistema que la competición no publica (Segunda no da 5 ni 6) aporta menos
+    filas, y esa columna queda nula sin perder a esos jugadores. La fila se crea
+    la primera vez que un jugador-partido aparece, con sus datos de partido; las
+    peticiones siguientes solo añaden su columna de puntos.
+    """
+    for game in round_data.games:
+        for home, team in ((True, game.home), (False, game.away)):
+            opponent = game.away if home else game.home
+            for report in team.reports:
+                key = (report.player.id, game.id)
+                row = rows.get(key)
+                if row is None:
+                    row = {
+                        "player_id": report.player.id,
+                        "team_id": team.id,
+                        "match_id": game.id,
+                        "round_id": round_data.id,
+                        "home": home,
+                        "home_score": game.home.score,
+                        "away_score": game.away.score,
+                        "result": _match_result(team.score, opponent.score),
+                    }
+                    rows[key] = row
+                row[column] = report.points
+
+
+def _match_result(team_score: int | None, opponent_score: int | None) -> str | None:
+    if team_score is None or opponent_score is None:
+        return None
+    if team_score > opponent_score:
+        return "win"
+    if team_score < opponent_score:
+        return "loss"
+    return "draw"
+
+
+def _round_points_frame(rows: list[dict]) -> pd.DataFrame:
+    nullable_ints = ["team_id", "match_id", "round_id", "home_score", "away_score", *POINT_COLUMNS]
+    return pd.DataFrame(rows, columns=_ROUND_POINTS_COLUMNS).astype(
+        dict.fromkeys(nullable_ints, "Int64")
+    )
+
+
+def ingest_rounds(
+    storage: Storage,
+    competition: str,
+    season: str,
+    *,
+    transport: HttpTransport | None = None,
+    round_ids: list[int] | None = None,
+    resume: bool = False,
+) -> IngestResult:
+    """Publica fantasy_round_points de una temporada, jornada a jornada.
+
+    Descubre las jornadas de la temporada (a menos que se pasen en ``round_ids``)
+    sembrando un ``round_id`` desde el detalle de un veterano de la plantilla
+    actual y leyendo el catálogo ``season.rounds`` de la respuesta de esa jornada.
+    Para cada jornada hace cinco peticiones (una por sistema de puntuación) y
+    vuelca una fila por jugador-partido con los cinco sistemas como columnas,
+    incluidos los jugadores que ya dejaron la competición.
+
+    El upsert por ``round_id`` hace la ingesta idempotente: reprocesar una jornada
+    reescribe sus filas sin duplicar. Con ``resume=True`` se saltan las jornadas
+    ya presentes en la tabla (temporada pasada inmutable), para no re-descargar en
+    un backfill reanudado. Devuelve las filas escritas y el conteo de peticiones.
+    """
+    transport = transport or HttpTransport(
+        wait_seconds=WAIT_SECONDS,
+        overflow_proxy=scrapeops_proxy_from_env(enabled=PROXY_OVERFLOW),
+    )
+    client = BiwengerClient(transport, storage.raw)
+    partition = {"competition": competition, "season": season}
+    result = IngestResult(rows={"fantasy_round_points": 0})
+    requests = 0
+
+    if round_ids is None:
+        players = client.fetch_competition_data(competition).data.players.values()
+        seed = _discover_seed_round(client, competition, season, players)
+        if seed is None:
+            raise RoundDiscoveryError(
+                f"Ningún jugador de la plantilla actual de {competition} sirvió detalle para la "
+                f"temporada {season}: no hay de dónde descubrir las jornadas."
+            )
+        catalogue = client.fetch_round(competition, seed, 1).data
+        requests += 1
+        round_ids = [r.id for r in catalogue.season.rounds if r.status in (None, "finished")]
+        logger.info(
+            "biwenger rounds %s %s: %d jornadas descubiertas desde la jornada %d",
+            competition,
+            season,
+            len(round_ids),
+            seed,
+        )
+
+    already = (
+        {
+            int(v)
+            for v in storage.curated.distinct_values(
+                "fantasy_round_points", "round_id", partition=partition
+            )
+        }
+        if resume
+        else set()
+    )
+
+    for index, round_id in enumerate(round_ids, start=1):
+        if round_id in already:
+            logger.info(
+                "biwenger rounds %s %s [%d/%d] jornada %d ya curada, saltada",
+                competition,
+                season,
+                index,
+                len(round_ids),
+                round_id,
+            )
+            continue
+        rows: dict[tuple[int, int], dict] = {}
+        for system, column in POINT_SYSTEMS.items():
+            round_data = client.fetch_round(competition, round_id, int(system)).data
+            requests += 1
+            _accumulate_round(rows, round_data, column)
+        storage.curated.upsert_table(
+            "fantasy_round_points",
+            _round_points_frame(list(rows.values())),
+            key="round_id",
+            partition=partition,
+        )
+        result.rows["fantasy_round_points"] += len(rows)
+        logger.info(
+            "biwenger rounds %s %s [%d/%d] jornada %d: %d filas",
+            competition,
+            season,
+            index,
+            len(round_ids),
+            round_id,
+            len(rows),
+        )
+
+    logger.info(
+        "biwenger rounds %s %s: %d filas, %d jornadas, %d peticiones",
+        competition,
+        season,
+        result.rows["fantasy_round_points"],
+        len(round_ids),
+        requests,
     )
     return result

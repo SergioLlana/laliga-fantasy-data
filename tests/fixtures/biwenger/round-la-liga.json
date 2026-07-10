@@ -1,0 +1,94 @@
+{
+ "status": 200,
+ "data": {
+  "id": 4484,
+  "name": "Round 1",
+  "short": "R1",
+  "status": "finished",
+  "scoreID": 1,
+  "season": {
+   "id": "2026",
+   "name": "2025/2026 season",
+   "slug": "2025-2026",
+   "rounds": [
+    {
+     "id": 4484,
+     "name": "Round 1",
+     "short": "R1",
+     "status": "finished"
+    },
+    {
+     "id": 4485,
+     "name": "Round 2",
+     "short": "R2",
+     "status": "finished"
+    },
+    {
+     "id": 4489,
+     "name": "Round 6",
+     "short": "R6",
+     "status": "finished"
+    }
+   ]
+  },
+  "games": [
+   {
+    "id": 46124,
+    "date": 1755277200,
+    "status": "finished",
+    "home": {
+     "id": 289,
+     "name": "Girona",
+     "slug": "girona",
+     "score": 1,
+     "reports": [
+      {
+       "player": {
+        "id": 9075,
+        "name": "Portu",
+        "slug": "portu",
+        "position": 4
+       },
+       "points": 5
+      },
+      {
+       "player": {
+        "id": 11196,
+        "name": "Lemar",
+        "slug": "thomas-lemar",
+        "position": 3
+       },
+       "points": 2
+      }
+     ]
+    },
+    "away": {
+     "id": 70,
+     "name": "Rayo Vallecano",
+     "slug": "rayo-vallecano",
+     "score": 3,
+     "reports": [
+      {
+       "player": {
+        "id": 2595,
+        "name": "Gumbau",
+        "slug": "gumbau",
+        "position": 3
+       },
+       "points": 6
+      },
+      {
+       "player": {
+        "id": 5352,
+        "name": "Óscar Valentín",
+        "slug": "o-valentin",
+        "position": 3
+       },
+       "points": 4
+      }
+     ]
+    }
+   }
+  ]
+ }
+}

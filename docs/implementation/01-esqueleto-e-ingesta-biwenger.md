@@ -39,6 +39,7 @@ Validación de estructura con modelos Pydantic: si falta un campo esperado o cam
 | `biwenger_teams` | equipo | id, slug, nombre, competición |
 | `biwenger_rounds` | jornada | id, nombre, temporada, competición, estado |
 | `fantasy_points` | jugador-partido | ids Biwenger de jugador/partido/jornada, temporada, competición, puntos en los 5 sistemas, minutos, nota sofascore (si existe), local/visitante, resultado |
+| `fantasy_round_points` | jugador-partido | ids Biwenger de jugador/equipo/partido/jornada, temporada, competición, puntos en los 5 sistemas, local/visitante, marcador, resultado. Igual que `fantasy_points` pero **sin minutos ni nota** y con *todos* los jugadores de cada jornada, incluidos los que ya dejaron la competición (el detalle por jugador da 404) |
 | `biwenger_prices` | jugador-día | id jugador, fecha, precio, temporada |
 
 Nota: estas tablas llevan aún IDs de Biwenger. El ID canónico llega en el paso 2; a partir de entonces `fantasy_points` y `biwenger_prices` se publican con ambos.
@@ -49,6 +50,9 @@ Nota: estas tablas llevan aún IDs de Biwenger. El ID canónico llega en el paso
 lfdata ingest biwenger --competition la-liga --season 2026        # temporada actual
 lfdata ingest biwenger --competition segunda-division --season 2026
 lfdata backfill biwenger --competition la-liga --from-season 2022 # históricas, con espera larga
+# Puntos por jornada de todos los jugadores (histórico sin sesgo de supervivencia).
+# Descubre las jornadas de la temporada solo; --resume salta las ya curadas.
+lfdata ingest biwenger-rounds --competition la-liga --season 2025 [--resume]
 ```
 
 ## Orden de trabajo
