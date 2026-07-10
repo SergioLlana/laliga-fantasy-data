@@ -12,6 +12,7 @@ from lfdata.sources.biwenger import (
     RoundDiscoveryError,
     SourceFormatError,
     ingest_reports,
+    ingest_reports_delta,
     ingest_rounds,
     ingest_squad,
 )
@@ -35,8 +36,12 @@ class FakeTransport:
         return self.payload
 
 
-def _competition_payload(*slugs: str) -> bytes:
-    """Plantilla mínima con los jugadores dados (solo lo que exige el modelo)."""
+def _competition_payload(*slugs: str, rounds: list[tuple[int, str]] | None = None) -> bytes:
+    """Plantilla mínima con los jugadores dados (solo lo que exige el modelo).
+
+    ``rounds`` inyecta el catálogo ``season.rounds`` (pares id, estado) que el
+    refresh por deltas usa para detectar la jornada recién terminada.
+    """
     players = {
         str(i): {
             "id": i,
@@ -49,13 +54,19 @@ def _competition_payload(*slugs: str) -> bytes:
         }
         for i, slug in enumerate(slugs, start=1)
     }
+    season = {"id": "2026", "name": "2025/2026", "slug": "2025-2026"}
+    if rounds is not None:
+        season["rounds"] = [
+            {"id": rid, "name": f"J{rid}", "short": f"J{rid}", "status": status}
+            for rid, status in rounds
+        ]
     payload = {
         "status": 200,
         "data": {
             "id": 1,
             "name": "Primera División",
             "slug": "la-liga",
-            "season": {"id": "2026", "name": "2025/2026", "slug": "2025-2026"},
+            "season": season,
             "players": players,
             "teams": {},
         },
@@ -763,3 +774,192 @@ def test_cli_ingest_biwenger_rounds_end_to_end(tmp_path: Path, monkeypatch, caps
     )
     assert parquet.exists()
     assert raw_files(tmp_path)
+
+
+# --- Refresh por deltas post-jornada (#52) -----------------------------------
+
+_DELTA_STATS = {"minutesPlayed": 90, "sofascore": 7.0, "homeScore": 1, "awayScore": 0, "win": True}
+
+
+def _detail_scoring_round(player_id: int, slug: str, round_id: int, match_id: int) -> bytes:
+    """Detalle de un jugador con un report puntuado en ``round_id``."""
+    return json.dumps(
+        {
+            "status": 200,
+            "data": {
+                "id": player_id,
+                "name": slug,
+                "slug": slug,
+                "birthday": 20010412,
+                "reports": [
+                    {
+                        "home": True,
+                        "match": {
+                            "id": match_id,
+                            "round": {"id": round_id, "name": f"J{round_id}"},
+                        },
+                        "points": {"1": 5, "2": 4, "3": 3, "5": 9, "6": 0},
+                        "rawStats": _DELTA_STATS,
+                    }
+                ],
+                "prices": [[250721, 230000]],
+            },
+        }
+    ).encode()
+
+
+class DeltaTransport:
+    """Enruta /data (con catálogo), /rounds/{id} (quién puntuó) y /players/{slug}."""
+
+    def __init__(
+        self, competition: bytes, details: dict[str, bytes], round_payload: bytes | None = None
+    ) -> None:
+        self.competition = competition
+        self.details = details
+        self.round_payload = round_payload
+        self.detail_slugs: list[str] = []
+        self.round_fetches: list[int] = []
+
+    def get(self, url, params=None) -> bytes:
+        if "/rounds/" in url:
+            self.round_fetches.append(int(url.rsplit("/", 1)[1]))
+            return self.round_payload
+        if "/players/" in url:
+            slug = url.rsplit("/", 1)[1]
+            self.detail_slugs.append(slug)
+            return self.details[slug]
+        return self.competition
+
+
+def test_delta_refreshes_only_scorers(storage: Storage) -> None:
+    # Plantilla: id 1 "scorer" (puntuó J4484) e id 2 "bench" (no puntuó).
+    # El catálogo trae 4484 terminada y 4485 pendiente (esta se ignora).
+    comp = _competition_payload("scorer", "bench", rounds=[(4484, "finished"), (4485, "pending")])
+    # La jornada 4484 lista al id 1 (en plantilla) y al id 99999 (baja, fuera).
+    round_payload = _round_payload(4484, 1, catalogue_ids=(4484,))
+    transport = DeltaTransport(
+        comp, {"scorer": _detail_scoring_round(1, "scorer", 4484, 46124)}, round_payload
+    )
+    result = ingest_reports_delta(storage, "la-liga", "2026", transport=transport)
+
+    # Solo se pidió el detalle del que puntuó y está en plantilla; nunca "bench".
+    assert transport.detail_slugs == ["scorer"]
+    assert transport.round_fetches == [4484]  # solo la jornada terminada, no la pendiente
+    assert result.stats == {"jugadores refrescados": 1, "jugadores saltados": 1}
+    points = storage.curated.read_table("fantasy_points")
+    assert set(points["round_id"].astype(int)) == {4484}
+
+
+def test_delta_no_new_round_fetches_no_details(storage: Storage) -> None:
+    comp = _competition_payload("scorer", "bench", rounds=[(4484, "finished")])
+    round_payload = _round_payload(4484, 1, catalogue_ids=(4484,))
+    details = {"scorer": _detail_scoring_round(1, "scorer", 4484, 46124)}
+    # Primer run procesa la jornada 4484.
+    ingest_reports_delta(
+        storage, "la-liga", "2026", transport=DeltaTransport(comp, details, round_payload)
+    )
+    # Segundo run: 4484 ya está en fantasy_points -> nada nuevo, cero peticiones.
+    second = DeltaTransport(comp, details, round_payload)
+    result = ingest_reports_delta(storage, "la-liga", "2026", transport=second)
+
+    assert second.detail_slugs == []
+    assert second.round_fetches == []
+    assert result.stats == {"jugadores refrescados": 0, "jugadores saltados": 2}
+
+
+def test_delta_round_rows_match_full_traversal(storage: Storage, tmp_path: Path) -> None:
+    """Las filas de la jornada quedan idénticas a las del recorrido completo."""
+    comp = _competition_payload("scorer", "bench", rounds=[(4484, "finished")])
+    scorer = _detail_scoring_round(1, "scorer", 4484, 46124)
+    bench = _detail_scoring_round(2, "bench", 4485, 46200)  # el banquillo puntuó otra jornada
+
+    # Recorrido completo: baja el detalle de los dos jugadores.
+    full = DeltaTransport(comp, {"scorer": scorer, "bench": bench})
+    ingest_reports(storage, "la-liga", "2026", transport=full)
+    assert set(full.detail_slugs) == {"scorer", "bench"}
+    full_points = storage.curated.read_table("fantasy_points")
+
+    # Delta en almacenamiento aparte: solo baja al que puntuó la jornada 4484.
+    delta_storage = Storage(f"file://{tmp_path}/delta")
+    round_payload = _round_payload(4484, 1, catalogue_ids=(4484,))
+    ingest_reports_delta(
+        delta_storage,
+        "la-liga",
+        "2026",
+        transport=DeltaTransport(comp, {"scorer": scorer}, round_payload),
+    )
+    delta_points = delta_storage.curated.read_table("fantasy_points")
+
+    def round_slice(df):
+        return (
+            df[df["round_id"].astype("Int64") == 4484]
+            .sort_values("player_id")
+            .reset_index(drop=True)
+        )
+
+    pd.testing.assert_frame_equal(round_slice(full_points), round_slice(delta_points))
+
+
+def test_delta_is_idempotent(storage: Storage) -> None:
+    comp = _competition_payload("scorer", "bench", rounds=[(4484, "finished")])
+    details = {"scorer": _detail_scoring_round(1, "scorer", 4484, 46124)}
+    round_payload = _round_payload(4484, 1, catalogue_ids=(4484,))
+
+    def run() -> None:
+        ingest_reports_delta(
+            storage, "la-liga", "2026", transport=DeltaTransport(comp, details, round_payload)
+        )
+
+    run()
+    run()
+    assert len(storage.curated.read_table("fantasy_points")) == 1
+
+
+def test_cli_biwenger_delta_reports_refreshed_and_skipped(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    comp = _competition_payload("scorer", "bench", rounds=[(4484, "finished")])
+    round_payload = _round_payload(4484, 1, catalogue_ids=(4484,))
+    scorer_detail = _detail_scoring_round(1, "scorer", 4484, 46124)
+
+    def fake_get(self, url, params=None) -> bytes:
+        if "/rounds/" in url:
+            return round_payload
+        if "/players/" in url:
+            return scorer_detail
+        return comp
+
+    monkeypatch.setattr("lfdata.sources.http.HttpTransport.get", fake_get)
+    exit_code = main(
+        [
+            "ingest",
+            "biwenger",
+            "--competition",
+            "la-liga",
+            "--season",
+            "2026",
+            "--delta",
+            "--data",
+            f"file://{tmp_path}",
+        ]
+    )
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "jugadores refrescados: 1" in out
+    assert "jugadores saltados: 1" in out
+
+
+def test_cli_biwenger_delta_requires_season(tmp_path: Path, capsys) -> None:
+    exit_code = main(
+        [
+            "ingest",
+            "biwenger",
+            "--competition",
+            "la-liga",
+            "--delta",
+            "--data",
+            f"file://{tmp_path}",
+        ]
+    )
+    assert exit_code == 2
+    assert "--delta requiere --season" in capsys.readouterr().out

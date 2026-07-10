@@ -39,10 +39,25 @@ class Team(_BiwengerModel):
     slug: str
 
 
+class SeasonRound(_BiwengerModel):
+    """Una jornada del catálogo de la temporada (``season.rounds``).
+
+    Tanto la plantilla (``competitions/.../data``) como el detalle de una jornada
+    (``rounds/...``) traen este catálogo con el estado de cada jornada: es la vía
+    para saber qué jornada acaba de terminar sin lista manual.
+    """
+
+    id: int
+    name: str
+    short: str | None = None
+    status: str | None = None
+
+
 class Season(_BiwengerModel):
     id: str
     name: str
     slug: str
+    rounds: list[SeasonRound] = Field(default_factory=list)
 
 
 class CompetitionData(_BiwengerModel):
@@ -165,27 +180,14 @@ class RoundGame(_BiwengerModel):
     away: RoundTeam
 
 
-class SeasonRound(_BiwengerModel):
-    id: int
-    name: str
-    short: str | None = None
-    status: str | None = None
-
-
-class RoundSeason(_BiwengerModel):
-    id: str
-    name: str
-    slug: str
-    rounds: list[SeasonRound] = Field(default_factory=list)
-
-
 class RoundData(_BiwengerModel):
     id: int
     name: str
     short: str | None = None
     status: str | None = None
     score_id: int = Field(alias="scoreID")
-    season: RoundSeason
+    # Mismo catálogo ``season.rounds`` que la plantilla: reutiliza ``Season``.
+    season: Season
     games: list[RoundGame] = Field(default_factory=list)
 
 
