@@ -1,13 +1,16 @@
 from datetime import date
 from pathlib import Path
 
+import boto3
 import pandas as pd
 import pytest
+from moto import mock_aws
 
 from lfdata.storage import (
     CuratedStore,
     LocalBackend,
     RawStore,
+    S3Backend,
     Storage,
     StorageBackend,
     backend_from_uri,
@@ -133,8 +136,8 @@ def test_last_download_date_returns_newest(storage: Storage) -> None:
 def test_unsupported_uri_scheme_raises() -> None:
     with pytest.raises(ValueError, match="no soportada"):
         backend_from_uri("ftp://x")
-    with pytest.raises(NotImplementedError, match="issue #5"):
-        backend_from_uri("s3://bucket")
+    with pytest.raises(ValueError, match="sin bucket"):
+        backend_from_uri("s3://")
 
 
 def test_in_memory_backend_satisfies_protocol() -> None:
@@ -177,6 +180,95 @@ def test_stores_run_against_a_fake_backend_without_touching_disk() -> None:
 def test_read_table_missing_raises() -> None:
     with pytest.raises(FileNotFoundError):
         CuratedStore(InMemoryBackend()).read_table("nope")
+
+
+# --- Backend S3 contra un doble local (moto): sin red ni cuenta AWS real ------
+
+BUCKET = "lfdata-test-bucket"
+REGION = "eu-south-2"
+
+
+@pytest.fixture
+def s3_bucket(monkeypatch: pytest.MonkeyPatch):
+    """Un bucket S3 vacío en moto, con credenciales y región falsas.
+
+    Las variables de entorno evitan que boto3 caiga en un perfil real, de modo
+    que ``backend_from_uri("s3://...")`` pueda construir su propio cliente sin
+    tocar AWS. moto intercepta toda llamada boto3 emitida dentro del ``with``.
+    """
+    for var in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
+        monkeypatch.setenv(var, "testing")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", REGION)
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    with mock_aws():
+        boto3.client("s3", region_name=REGION).create_bucket(
+            Bucket=BUCKET,
+            CreateBucketConfiguration={"LocationConstraint": REGION},
+        )
+        yield
+
+
+def test_s3_backend_satisfies_protocol() -> None:
+    assert isinstance(S3Backend("b"), StorageBackend)
+
+
+def test_backend_from_uri_builds_s3_backend() -> None:
+    assert isinstance(backend_from_uri("s3://lfdata-data-593760774245"), S3Backend)
+
+
+def test_s3_backend_write_read_and_exists(s3_bucket: None) -> None:
+    backend = backend_from_uri(f"s3://{BUCKET}")
+    assert backend.exists("raw/x.json") is False
+    backend.write_bytes("raw/x.json", b"payload")
+    assert backend.exists("raw/x.json") is True
+    assert backend.read_bytes("raw/x.json") == b"payload"
+
+
+def test_s3_backend_list_keys_is_prefix_scoped_and_sorted(s3_bucket: None) -> None:
+    backend = backend_from_uri(f"s3://{BUCKET}")
+    backend.write_bytes("raw/b.json", b"2")
+    backend.write_bytes("raw/a.json", b"1")
+    backend.write_bytes("curated/t.parquet", b"3")
+    assert backend.list_keys("raw/") == ["raw/a.json", "raw/b.json"]
+
+
+def test_s3_uri_prefix_is_transparent_to_the_store(s3_bucket: None) -> None:
+    # `s3://bucket/sub/dir` coloca los objetos bajo `sub/dir/`, pero la store
+    # sigue viendo claves lógicas (`raw/...`) sin enterarse del prefijo.
+    backend = backend_from_uri(f"s3://{BUCKET}/sub/dir")
+    backend.write_bytes("raw/x.json", b"p")
+    assert backend.list_keys("raw/") == ["raw/x.json"]
+    assert backend.read_bytes("raw/x.json") == b"p"
+    real = boto3.client("s3", region_name=REGION).list_objects_v2(Bucket=BUCKET)
+    assert [obj["Key"] for obj in real["Contents"]] == ["sub/dir/raw/x.json"]
+
+
+def test_stores_run_end_to_end_against_s3(s3_bucket: None) -> None:
+    storage = Storage(f"s3://{BUCKET}")
+
+    # RawStore: guardar y localizar la fecha de descarga más reciente.
+    storage.raw.save("s", "d", "x", b"1", download_date=date(2026, 7, 1))
+    storage.raw.save("s", "d", "x", b"2", download_date=date(2026, 7, 5))
+    assert storage.raw.last_download_date("s", "d", "x") == date(2026, 7, 5)
+    assert storage.raw.last_download_date("s", "d", "missing") is None
+
+    # CuratedStore: upsert particionado reanudable y lectura reconstruida.
+    partition = {"competition": "la-liga"}
+    storage.curated.upsert_table(
+        "t", pd.DataFrame({"player_id": [1, 2], "value": [10, 20]}), partition=partition
+    )
+    storage.curated.upsert_table(
+        "t", pd.DataFrame({"player_id": [1, 3], "value": [99, 30]}), partition=partition
+    )
+    read = storage.curated.read_table("t").sort_values("player_id").reset_index(drop=True)
+    assert read["player_id"].tolist() == [1, 2, 3]
+    assert read["value"].tolist() == [99, 20, 30]
+    assert read["competition"].tolist() == ["la-liga"] * 3
+
+    # retain_keys reescribe la partición conservando solo lo indicado.
+    removed = storage.curated.retain_keys("t", keep={1, 3}, key="player_id", partition=partition)
+    assert removed == 1
+    assert sorted(storage.curated.read_table("t")["player_id"]) == [1, 3]
 
 
 def test_local_write_is_atomic_and_leaves_no_temp_file(tmp_path: Path) -> None:
