@@ -20,3 +20,15 @@ def team_candidates(biwenger_name: str, tm_clubs: Iterable[dict]) -> list[dict]:
 def player_candidates(biwenger_name: str, tm_players: Iterable[dict]) -> list[dict]:
     """Jugadores de Transfermarkt cuyo nombre es compatible con el de Biwenger."""
     return [player for player in tm_players if name_compatible(biwenger_name, player["name"])]
+
+
+def birthdate_compatible(a: str, b: str) -> bool:
+    """¿Dos fechas de nacimiento ISO son compatibles?
+
+    Compatibles si coinciden (por día) o si falta alguna de las dos: Biwenger solo
+    publica la fecha en el detalle por jugador, así que muchas filas la tienen
+    vacía. Solo una discrepancia real entre fechas presentes descarta un match.
+    """
+    if not a or not b:
+        return True
+    return a[:10] == b[:10]

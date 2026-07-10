@@ -261,6 +261,32 @@ def test_ingest_reports_is_idempotent(storage: Storage) -> None:
     assert len(storage.curated.read_table("biwenger_prices")) == 4
 
 
+# --- fecha de nacimiento desde el detalle (#37) -----------------------------
+
+
+def test_ingest_squad_leaves_birth_date_empty(storage: Storage) -> None:
+    """La plantilla no trae fecha: la columna existe pero queda vacía."""
+    ingest_squad(storage, "la-liga", transport=FakeTransport(FIXTURE.read_bytes()))
+    players = storage.curated.read_table("biwenger_players")
+    assert "birth_date" in players.columns
+    assert players["birth_date"].isna().all()
+
+
+def test_ingest_reports_fills_birth_date_on_players(storage: Storage) -> None:
+    """Reports rellena birth_date en biwenger_players desde el detalle, sin perder el resto."""
+    ingest_squad(storage, "la-liga", transport=FakeTransport(_competition_payload("alex-fores")))
+    ingest_reports(
+        storage,
+        "la-liga",
+        "2026",
+        transport=RoutingTransport(_competition_payload("alex-fores"), PLAYER_LA_LIGA.read_bytes()),
+    )
+    players = storage.curated.read_table("biwenger_players")
+    row = players[players["id"] == 1].iloc[0]
+    assert row["birth_date"] == "2001-04-12"  # birthday 20010412 del detalle
+    assert row["name"] == "alex-fores"  # el resto de la fila se conserva
+
+
 # --- resiliencia: un fallo por jugador no aborta el run (#36) ---------------
 
 

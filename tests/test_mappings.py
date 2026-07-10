@@ -1,9 +1,10 @@
 """Tests de la capa de mappings: normalización, matching y verificación.
 
 El matching se ancla en Biwenger y busca contraparte en Transfermarkt por club +
-nombre normalizado (Biwenger no publica fecha de nacimiento en las tablas
-curadas, decisión registrada en el issue #8). Los casos se montan con tablas
-curadas sintéticas pequeñas, sin red.
+nombre normalizado, endurecido con la fecha de nacimiento que la ingesta de
+reports rellena en `biwenger_players` (issue #37): un homónimo único en el club
+solo se auto-aprueba si las fechas coinciden o falta alguna. Los casos se montan
+con tablas curadas sintéticas pequeñas, sin red.
 """
 
 from pathlib import Path
@@ -33,7 +34,7 @@ def seed(
 ) -> None:
     partition = {"competition": competition}
     storage.curated.write_table("biwenger_teams", pd.DataFrame(teams), partition=partition)
-    players_df = pd.DataFrame(players, columns=["id", "name", "team_id"]).astype(
+    players_df = pd.DataFrame(players, columns=["id", "name", "team_id", "birth_date"]).astype(
         {"team_id": "Int64"}
     )
     storage.curated.write_table("biwenger_players", players_df, partition=partition)
@@ -123,6 +124,61 @@ def test_fores_case_maps_to_current_club(storage: Storage, tmp_path: Path) -> No
         if r["canonical_id"] == canonical and r["fuente"] == "transfermarkt"
     )
     assert tm_id == "709380"
+
+
+# --- desempate por fecha de nacimiento (#37) ---------------------------------
+
+
+def test_birthdate_confirms_auto_match(storage: Storage, tmp_path: Path) -> None:
+    """Homónimo único en el club con fecha coincidente: se aprueba solo."""
+    seed(
+        storage,
+        teams=BASIC_TEAMS,
+        players=[{"id": 100, "name": "Williams", "team_id": 1, "birth_date": "1994-06-15"}],
+        tm_players=BASIC_TM,
+    )
+    report = run_map(storage, tmp_path / "mappings")
+
+    assert report.players_auto == 1
+    assert report.players_review == 0
+
+
+def test_birthdate_missing_is_tolerant(storage: Storage, tmp_path: Path) -> None:
+    """Sin fecha en Biwenger, un homónimo único sigue aprobándose solo."""
+    seed(
+        storage,
+        teams=BASIC_TEAMS,
+        players=[{"id": 100, "name": "Williams", "team_id": 1}],  # birth_date ausente
+        tm_players=BASIC_TM,
+    )
+    report = run_map(storage, tmp_path / "mappings")
+
+    assert report.players_auto == 1
+    assert report.players_review == 0
+
+
+def test_birthdate_mismatch_degrades_to_review(storage: Storage, tmp_path: Path) -> None:
+    """Homónimo único pero con fecha discrepante: no se auto-aprueba, va a revisión."""
+    seed(
+        storage,
+        teams=BASIC_TEAMS,
+        players=[{"id": 100, "name": "Williams", "team_id": 1, "birth_date": "1990-01-01"}],
+        tm_players=BASIC_TM,  # Iñaki Williams (10) nació 1994-06-15
+    )
+    report = run_map(storage, tmp_path / "mappings")
+
+    assert report.players_auto == 0
+    assert report.players_review == 1
+
+    store = MappingStore(tmp_path / "mappings")
+    store.load()
+    review = store.players_review
+    assert review["motivo"].tolist() == ["fecha-discrepante"]
+    assert review["tm_id"].tolist() == ["10"]
+    # La fila muestra ambas fechas como evidencia del desempate manual.
+    assert review["biwenger_birth_date"].tolist() == ["1990-01-01"]
+    assert review["tm_birth_date"].tolist() == ["1994-06-15"]
+    assert (review["decision"] == "").all()
 
 
 def test_ambiguous_player_goes_to_review(storage: Storage, tmp_path: Path) -> None:
