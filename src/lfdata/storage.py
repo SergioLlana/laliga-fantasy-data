@@ -269,6 +269,25 @@ class CuratedStore:
             self.write_table(table, kept, partition=partition)
         return removed
 
+    def distinct_values(
+        self,
+        table: str,
+        column: str,
+        *,
+        partition: Mapping[str, str] | None = None,
+    ) -> set:
+        """Valores distintos de ``column`` en una partición, o conjunto vacío.
+
+        Lee solo esa partición (no la tabla entera) y descarta nulos. Sobre una
+        partición inexistente devuelve ``set()``. Sirve para saber qué claves ya
+        están escritas y saltarlas al reanudar un backfill.
+        """
+        table_key = self._table_key(table, partition)
+        if not self._backend.exists(table_key):
+            return set()
+        existing = pd.read_parquet(io.BytesIO(self._backend.read_bytes(table_key)))
+        return set(existing[column].dropna())
+
     @staticmethod
     def _table_key(table: str, partition: Mapping[str, str] | None) -> str:
         if partition:

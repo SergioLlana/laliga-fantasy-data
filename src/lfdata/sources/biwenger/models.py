@@ -126,3 +126,69 @@ class PlayerDetail(_BiwengerModel):
 class PlayerDetailResponse(_BiwengerModel):
     status: int
     data: PlayerDetail
+
+
+# --- Jornada completa: rounds/{competición}/{round_id}?score=N --------------
+#
+# Devuelve los partidos de una jornada con **todos** los jugadores que puntuaron
+# —incluidos los que ya dejaron la competición— y sus puntos bajo el sistema
+# `N` (una petición por sistema). Sin `rawStats`: no trae minutos ni nota. La
+# respuesta incluye, además, ``season.rounds`` con el catálogo completo de
+# jornadas de esa temporada, del que sale la lista de ids sin lista manual.
+
+
+class RoundReportPlayer(_BiwengerModel):
+    id: int
+    name: str
+    slug: str
+    position: int | None = None
+
+
+class RoundReport(_BiwengerModel):
+    player: RoundReportPlayer
+    points: int
+
+
+class RoundTeam(_BiwengerModel):
+    id: int
+    name: str
+    slug: str
+    score: int | None = None
+    reports: list[RoundReport] = Field(default_factory=list)
+
+
+class RoundGame(_BiwengerModel):
+    id: int
+    date: int | None = None
+    status: str | None = None
+    home: RoundTeam
+    away: RoundTeam
+
+
+class SeasonRound(_BiwengerModel):
+    id: int
+    name: str
+    short: str | None = None
+    status: str | None = None
+
+
+class RoundSeason(_BiwengerModel):
+    id: str
+    name: str
+    slug: str
+    rounds: list[SeasonRound] = Field(default_factory=list)
+
+
+class RoundData(_BiwengerModel):
+    id: int
+    name: str
+    short: str | None = None
+    status: str | None = None
+    score_id: int = Field(alias="scoreID")
+    season: RoundSeason
+    games: list[RoundGame] = Field(default_factory=list)
+
+
+class RoundResponse(_BiwengerModel):
+    status: int
+    data: RoundData

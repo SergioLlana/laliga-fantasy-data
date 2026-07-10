@@ -43,6 +43,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     biwenger.set_defaults(func=_cmd_ingest_biwenger)
 
+    rounds = ingest_sources.add_parser(
+        "biwenger-rounds",
+        help="Puntos por jornada de todos los jugadores (histórico sin sesgo)",
+    )
+    rounds.add_argument(
+        "--competition",
+        required=True,
+        choices=("la-liga", "segunda-division"),
+        help="Competición a ingerir",
+    )
+    rounds.add_argument(
+        "--season",
+        required=True,
+        help="Temporada de Biwenger (p. ej. 2025 = 2024/2025)",
+    )
+    rounds.add_argument(
+        "--resume",
+        action="store_true",
+        help="Salta las jornadas ya curadas (reanudar un backfill sin re-descargar)",
+    )
+    rounds.add_argument(
+        "--data",
+        default=os.environ.get("LFDATA_DATA", DEFAULT_DATA_URI),
+        help=f"URI base del almacenamiento (por defecto {DEFAULT_DATA_URI} o $LFDATA_DATA)",
+    )
+    rounds.set_defaults(func=_cmd_ingest_biwenger_rounds)
+
     transfermarkt = ingest_sources.add_parser(
         "transfermarkt", help="Plantillas, valores de mercado y traspasos por competición"
     )
@@ -123,6 +150,15 @@ def _cmd_ingest_biwenger(args: argparse.Namespace) -> int:
     result = ingest_squad(storage, args.competition)
     if args.season:
         result |= ingest_reports(storage, args.competition, args.season)
+    return _report_ingest(result, args.competition, args.data)
+
+
+def _cmd_ingest_biwenger_rounds(args: argparse.Namespace) -> int:
+    from lfdata.sources.biwenger import ingest_rounds
+    from lfdata.storage import Storage
+
+    storage = Storage(args.data)
+    result = ingest_rounds(storage, args.competition, args.season, resume=args.resume)
     return _report_ingest(result, args.competition, args.data)
 
 

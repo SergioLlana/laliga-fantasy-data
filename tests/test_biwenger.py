@@ -9,8 +9,10 @@ import pytest
 from lfdata.cli import main
 from lfdata.sources.biwenger import (
     BiwengerClient,
+    RoundDiscoveryError,
     SourceFormatError,
     ingest_reports,
+    ingest_rounds,
     ingest_squad,
 )
 from lfdata.sources.http import SourceHTTPError
@@ -20,6 +22,7 @@ FIXTURES = Path(__file__).parent / "fixtures" / "biwenger"
 FIXTURE = FIXTURES / "competition-data-la-liga.json"
 PLAYER_LA_LIGA = FIXTURES / "player-reports-la-liga.json"
 PLAYER_SEGUNDA = FIXTURES / "player-reports-segunda-division.json"
+ROUND_LA_LIGA = FIXTURES / "round-la-liga.json"
 
 
 class FakeTransport:
@@ -483,3 +486,280 @@ def test_cli_ingest_with_season_adds_reports(tmp_path: Path, monkeypatch, capsys
     out = capsys.readouterr().out
     assert "fantasy_points: 3 filas" in out
     assert "biwenger_prices: 4 filas" in out
+
+
+# --- Rounds: puntos por jornada de todos los jugadores (#51) -----------------
+
+# Un jugador que ya dejó la competición: aparece en la jornada aunque su detalle
+# por jugador diera 404 y aunque no esté en la plantilla actual.
+DEPARTED_PLAYER_ID = 99999
+
+
+def _round_payload(round_id: int, score: int, *, catalogue_ids: tuple[int, ...]) -> bytes:
+    """Jornada sintética con un partido: un jugador local (id 1) y una baja.
+
+    Los puntos valen ``score`` para el local y ``score * 2`` para la baja, para
+    poder comprobar que cada una de las cinco peticiones rellena su columna. El
+    catálogo ``season.rounds`` lleva ``catalogue_ids`` (lo que se descubre).
+    """
+    return json.dumps(
+        {
+            "status": 200,
+            "data": {
+                "id": round_id,
+                "name": f"Round {round_id}",
+                "short": "R",
+                "status": "finished",
+                "scoreID": score,
+                "season": {
+                    "id": "2025",
+                    "name": "2024/2025 season",
+                    "slug": "2024-2025",
+                    "rounds": [
+                        {"id": r, "name": f"Round {r}", "short": "R", "status": "finished"}
+                        for r in catalogue_ids
+                    ],
+                },
+                "games": [
+                    {
+                        "id": round_id * 10,
+                        "date": 1700000000,
+                        "status": "finished",
+                        "home": {
+                            "id": 1,
+                            "name": "Home",
+                            "slug": "home",
+                            "score": 2,
+                            "reports": [
+                                {
+                                    "player": {
+                                        "id": 1,
+                                        "name": "alex-fores",
+                                        "slug": "alex-fores",
+                                        "position": 4,
+                                    },
+                                    "points": score,
+                                }
+                            ],
+                        },
+                        "away": {
+                            "id": 2,
+                            "name": "Away",
+                            "slug": "away",
+                            "score": 0,
+                            "reports": [
+                                {
+                                    "player": {
+                                        "id": DEPARTED_PLAYER_ID,
+                                        "name": "baja",
+                                        "slug": "baja",
+                                        "position": 3,
+                                    },
+                                    "points": score * 2,
+                                }
+                            ],
+                        },
+                    }
+                ],
+            },
+        }
+    ).encode()
+
+
+class RoundsTransport:
+    """Enruta /data, /players (semilla) y /rounds/{id}?score=N por sistema."""
+
+    def __init__(self, competition: bytes, player: bytes, catalogue_ids: tuple[int, ...]) -> None:
+        self.competition = competition
+        self.player = player
+        self.catalogue_ids = catalogue_ids
+        self.round_fetches: list[tuple[int, int]] = []
+
+    def get(self, url, params=None) -> bytes:
+        if "/rounds/" in url:
+            round_id = int(url.rsplit("/", 1)[1])
+            score = int(params["score"])
+            self.round_fetches.append((round_id, score))
+            return _round_payload(round_id, score, catalogue_ids=self.catalogue_ids)
+        if "/players/" in url:
+            return self.player
+        return self.competition
+
+
+def test_round_contract_la_liga(storage: Storage) -> None:
+    """Fija la forma real de la jornada: partidos, reports y catálogo de rondas."""
+    transport = FakeTransport(ROUND_LA_LIGA.read_bytes())
+    response = BiwengerClient(transport, storage.raw).fetch_round("la-liga", 4484, 1)
+
+    assert response.data.id == 4484
+    assert response.data.score_id == 1
+    assert len(response.data.season.rounds) == 3  # catálogo para descubrir jornadas
+    game = response.data.games[0]
+    assert game.home.slug == "girona"
+    assert game.home.score == 1 and game.away.score == 3
+    top = game.home.reports[0]
+    assert top.player.slug == "portu"
+    assert top.points == 5
+
+
+def test_round_raw_written_before_interpreting(storage: Storage, tmp_path: Path) -> None:
+    transport = FakeTransport(b'{"status": 200, "data": {"esto": "mal"}}')
+    with pytest.raises(SourceFormatError, match="cambió la forma"):
+        BiwengerClient(transport, storage.raw).fetch_round("la-liga", 4484, 1)
+    assert len(raw_files(tmp_path)) == 1
+
+
+def test_ingest_rounds_combines_five_systems(storage: Storage) -> None:
+    transport = RoundsTransport(
+        _competition_payload("alex-fores"), PLAYER_LA_LIGA.read_bytes(), (4484, 4485)
+    )
+    result = ingest_rounds(storage, "la-liga", "2025", transport=transport)
+
+    # 2 jornadas descubiertas × 2 jugadores por jornada = 4 filas.
+    assert result.rows == {"fantasy_round_points": 4}
+    points = storage.curated.read_table("fantasy_round_points")
+    assert len(points) == 4
+    assert {
+        "player_id",
+        "team_id",
+        "match_id",
+        "round_id",
+        "points_as",
+        "points_sofascore",
+        "points_stats",
+        "points_media",
+        "points_social",
+        "home",
+        "home_score",
+        "away_score",
+        "result",
+    } <= set(points.columns)
+
+    # El local (id 1) en la jornada 4484: cada sistema rellenó su columna.
+    home = points[(points["player_id"] == 1) & (points["round_id"] == 4484)].iloc[0]
+    assert home["points_as"] == 1  # score=1
+    assert home["points_sofascore"] == 2
+    assert home["points_stats"] == 3
+    assert home["points_media"] == 5
+    assert home["points_social"] == 6
+    assert bool(home["home"]) is True
+    assert (home["home_score"], home["away_score"]) == (2, 0)
+    assert home["result"] == "win"
+
+
+def test_ingest_rounds_includes_departed_player(storage: Storage) -> None:
+    """El jugador que ya no está en la plantilla actual sí aparece en la jornada."""
+    transport = RoundsTransport(
+        _competition_payload("alex-fores"), PLAYER_LA_LIGA.read_bytes(), (4484,)
+    )
+    ingest_rounds(storage, "la-liga", "2025", transport=transport)
+    points = storage.curated.read_table("fantasy_round_points")
+    assert DEPARTED_PLAYER_ID in set(points["player_id"])
+    baja = points[points["player_id"] == DEPARTED_PLAYER_ID].iloc[0]
+    assert baja["points_as"] == 2  # score * 2 con score=1
+    assert baja["result"] == "loss"  # su equipo (visitante) perdió 2-0
+
+
+def test_ingest_rounds_logs_request_count(storage: Storage, caplog) -> None:
+    transport = RoundsTransport(
+        _competition_payload("alex-fores"), PLAYER_LA_LIGA.read_bytes(), (4484, 4485)
+    )
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        ingest_rounds(storage, "la-liga", "2025", transport=transport)
+    # 1 semilla + 2 jornadas × 5 sistemas = 11 peticiones a rounds.
+    assert "11 peticiones" in caplog.text
+
+
+def test_ingest_rounds_is_idempotent(storage: Storage) -> None:
+    def run() -> None:
+        ingest_rounds(
+            storage,
+            "la-liga",
+            "2025",
+            transport=RoundsTransport(
+                _competition_payload("alex-fores"), PLAYER_LA_LIGA.read_bytes(), (4484, 4485)
+            ),
+        )
+
+    run()
+    run()
+    assert len(storage.curated.read_table("fantasy_round_points")) == 4
+
+
+def test_ingest_rounds_resume_skips_curated_rounds(storage: Storage) -> None:
+    ingest_rounds(
+        storage,
+        "la-liga",
+        "2025",
+        transport=RoundsTransport(
+            _competition_payload("alex-fores"), PLAYER_LA_LIGA.read_bytes(), (4484, 4485)
+        ),
+    )
+    # Segundo run reanudable: las dos jornadas ya están, no se piden sus sistemas.
+    resumed = RoundsTransport(
+        _competition_payload("alex-fores"), PLAYER_LA_LIGA.read_bytes(), (4484, 4485)
+    )
+    result = ingest_rounds(storage, "la-liga", "2025", transport=resumed, resume=True)
+    assert result.rows == {"fantasy_round_points": 0}
+    # Solo la semilla (4484, score 1); ningún sistema de una jornada saltada.
+    assert resumed.round_fetches == [(4484, 1)]
+    assert len(storage.curated.read_table("fantasy_round_points")) == 4
+
+
+def test_ingest_rounds_explicit_ids_skip_discovery(storage: Storage) -> None:
+    transport = RoundsTransport(
+        _competition_payload("alex-fores"), PLAYER_LA_LIGA.read_bytes(), (4484,)
+    )
+    ingest_rounds(storage, "la-liga", "2025", transport=transport, round_ids=[4485])
+    # Sin descubrimiento: ni /data para semilla ni jornada semilla; solo 4485×5.
+    assert {rid for rid, _ in transport.round_fetches} == {4485}
+    assert len(transport.round_fetches) == 5
+
+
+def test_ingest_rounds_raises_when_no_veteran(storage: Storage) -> None:
+    class NoVeteran:
+        def get(self, url, params=None) -> bytes:
+            if "/players/" in url:
+                raise SourceHTTPError(url, 404)  # toda la plantilla da 404
+            return _competition_payload("baja-1", "baja-2")
+
+    with pytest.raises(RoundDiscoveryError, match="descubrir las jornadas"):
+        ingest_rounds(storage, "la-liga", "2025", transport=NoVeteran())
+
+
+def test_cli_ingest_biwenger_rounds_end_to_end(tmp_path: Path, monkeypatch, capsys) -> None:
+    def fake_get(self, url, params=None) -> bytes:
+        if "/rounds/" in url:
+            round_id = int(url.rsplit("/", 1)[1])
+            return _round_payload(round_id, int(params["score"]), catalogue_ids=(4484,))
+        if "/players/" in url:
+            return PLAYER_LA_LIGA.read_bytes()
+        return _competition_payload("alex-fores")
+
+    monkeypatch.setattr("lfdata.sources.http.HttpTransport.get", fake_get)
+    exit_code = main(
+        [
+            "ingest",
+            "biwenger-rounds",
+            "--competition",
+            "la-liga",
+            "--season",
+            "2025",
+            "--data",
+            f"file://{tmp_path}",
+        ]
+    )
+    assert exit_code == 0
+    assert "fantasy_round_points: 2 filas" in capsys.readouterr().out
+    parquet = (
+        tmp_path
+        / "curated"
+        / "fantasy_round_points"
+        / "competition=la-liga"
+        / "season=2025"
+        / "data.parquet"
+    )
+    assert parquet.exists()
+    assert raw_files(tmp_path)
