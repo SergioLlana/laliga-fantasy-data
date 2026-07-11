@@ -64,8 +64,12 @@ def ingest_squads(
 
     Un jugador que la fuente ya no sirve (p. ej. 404 de una baja) se registra
     como fallo y se salta: sigue contando como visto en la plantilla, así que no
-    se le retira. Un refresh completo (sin ``max_clubs``) retira de
-    ``transfermarkt_players`` a quien ya no aparezca en ninguna plantilla.
+    se le retira. Si la petición de una plantilla entera falla (p. ej. 502/504
+    transitorio), el club se salta igual —se registra como fallo y el run
+    continúa con el resto—. Un refresh completo (sin ``max_clubs``) retira de
+    ``transfermarkt_players`` a quien ya no aparezca en ninguna plantilla, pero
+    omite esa retirada si alguna plantilla falló: sus jugadores no se vieron y
+    borrarlos sería confundir un fallo transitorio con una baja real.
 
     ``max_clubs`` limita el número de clubes recorridos (útil para una primera
     prueba real, dado que el recorrido completo son miles de peticiones a 4 s).
@@ -88,6 +92,7 @@ def ingest_squads(
     partition = {"competition": competition}
     result = IngestResult(rows=dict.fromkeys(_TABLE_KEYS, 0))
     seen_player_ids: set[int] = set()
+    squad_failures = 0
 
     for club_index, club in enumerate(clubs, start=1):
         logger.info(
@@ -98,6 +103,24 @@ def ingest_squads(
             club.name,
             club.id,
         )
+        try:
+            # La plantilla completa es una sola petición; si falla no conocemos a
+            # sus jugadores. Un 502/504 transitorio de la fuente aborta este club,
+            # pero no el run: los ya escritos se conservan y el resto se sigue
+            # recorriendo. Se registra como fallo para el resumen y el exit code.
+            squad = client.fetch_squad(club.id, season=season)
+        except SourceHTTPError as error:
+            squad_failures += 1
+            result.failures.append(PlayerFailure(f"club {club.name}", error.url, error.status))
+            logger.warning(
+                "transfermarkt %s club %s (%d): HTTP %d al pedir la plantilla, club saltado",
+                competition,
+                club.name,
+                club.id,
+                error.status,
+            )
+            continue
+
         player_records: list[dict] = []
         value_records: list[dict] = []
         transfer_records: list[dict] = []
@@ -105,7 +128,7 @@ def ingest_squads(
         injury_records: list[dict] = []
         downloaded = skipped = failed = 0
 
-        for member in client.fetch_squad(club.id, season=season):
+        for member in squad:
             player_id = member.player_id
             seen_player_ids.add(player_id)  # visto en plantilla aunque se salte o falle
             if since_days is not None and _scraped_within(storage, player_id, since_days):
@@ -178,7 +201,18 @@ def ingest_squads(
             storage.curated.upsert_table(table, frame, key=_TABLE_KEYS[table], partition=partition)
             result.rows[table] += len(frame)
 
-    if full_refresh:
+    if full_refresh and squad_failures:
+        # Alguna plantilla no se pudo leer: sus jugadores no están en
+        # ``seen_player_ids``, así que retirar ahora los borraría por un fallo
+        # transitorio, no por una baja real. Se omite la poda hasta un refresh
+        # que recorra la competición entera sin fallos de plantilla.
+        logger.warning(
+            "transfermarkt %s: %d plantillas fallaron; se omite la retirada de "
+            "jugadores para no borrar a nadie por un fallo transitorio",
+            competition,
+            squad_failures,
+        )
+    elif full_refresh:
         removed = storage.curated.retain_keys(
             "transfermarkt_players", seen_player_ids, key="id", partition=partition
         )

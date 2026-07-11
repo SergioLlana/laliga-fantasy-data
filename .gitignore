@@ -219,3 +219,9 @@ __marimo__/
 
 # Almacenamiento local de datos (raw/ y curated/)
 data/
+
+# Salida de las sondas de cuota de Biwenger (artefactos de ejecución, no versionar)
+biwenger-quota-probe-*.json
+
+# macOS
+.DS_Store

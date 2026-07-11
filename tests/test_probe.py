@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from lfdata.sources.biwenger.probe import (
+    CACHE_BUSTER_PARAM,
     ProbeReport,
     default_out_path,
     probe_quota_window,
@@ -196,6 +197,25 @@ def test_run_probe_writes_record_and_never_uses_a_proxy(tmp_path) -> None:
     assert len(saved["attempts"]) == 4  # 429 + 200 + dos confirmaciones
 
 
+def test_run_probe_cache_busts_every_request_to_force_origin(tmp_path) -> None:
+    # Cloudflare cachea el detalle por slug y serviría un 200 stale ocultando el 429;
+    # cada sondeo debe llevar un cache-buster único que fuerce el BYPASS al origen.
+    session = FakeSession([429, 200, 200, 200])
+    run_probe(
+        "la-liga",
+        tmp_path / "probe.json",
+        interval_seconds=0.0,
+        max_hours=1.0,
+        slugs=["a", "b", "c", "d"],
+        session=session,
+        sleep=lambda _: None,
+    )
+    busters = [params[CACHE_BUSTER_PARAM] for _, params in session.calls]
+    # Uno por petición y todos distintos: ninguna URL de sondeo se repite en la caché.
+    assert all(busters)
+    assert len(set(busters)) == len(busters)
+
+
 def test_run_probe_fetches_slugs_from_roster_when_not_given(tmp_path) -> None:
     # Sin slugs, los saca de la plantilla (1 petición) y luego sondea jugadores.
     roster = json.dumps(
@@ -209,6 +229,44 @@ def test_run_probe_fetches_slugs_from_roster_when_not_given(tmp_path) -> None:
     # Primera llamada a la plantilla; el resto, al detalle por jugador.
     assert "/competitions/la-liga/data" in session.calls[0][0]
     assert all("/players/la-liga/" in url for url, _ in session.calls[1:])
+
+
+class RosterBlockedThenStatuses:
+    """La plantilla da 429 sus primeras ``roster_blocks`` peticiones (caché de
+    Cloudflare fría) y luego sirve el JSON; el detalle por jugador va con ``statuses``."""
+
+    def __init__(self, roster: bytes, *, roster_blocks: int, statuses):
+        self._roster = roster
+        self._roster_blocks = roster_blocks
+        self._statuses = list(statuses)
+        self.calls: list[tuple[str, dict]] = []
+
+    def get(self, url, params=None):
+        self.calls.append((url, dict(params) if params else None))
+        if "/competitions/" in url:
+            if self._roster_blocks > 0:
+                self._roster_blocks -= 1
+                return SimpleNamespace(status_code=429, content=b"")
+            return SimpleNamespace(status_code=200, content=self._roster)
+        return SimpleNamespace(status_code=self._statuses.pop(0), content=b"")
+
+
+def test_run_probe_survives_roster_429_at_startup_and_retries(tmp_path) -> None:
+    # Bug real: con la caché de Cloudflare fría la plantilla daba 429 al arrancar y la
+    # sonda —pensada para esperar a que el 429 se reponga— se mataba antes de empezar
+    # (RosterUnavailableError sin capturar). Ahora resolver los slugs es perezoso: el
+    # fallo de plantilla es un turno perdido más y se reintenta al siguiente intervalo.
+    # roster_blocks=3 agota los 3 reintentos internos de _roster_slugs (primer turno
+    # sin slugs → estado 0) y al siguiente turno la plantilla ya se sirve.
+    roster = json.dumps({"data": {"players": {"1": {"slug": "pepe"}}}}).encode()
+    session = RosterBlockedThenStatuses(roster, roster_blocks=3, statuses=[429, 200, 200, 200])
+    report = run_probe(
+        "la-liga", tmp_path / "p.json", interval_seconds=0.0, session=session, sleep=lambda _: None
+    )
+    assert report.outcome == "recovered"
+    # El primer turno no consiguió plantilla: se registra como fallo puntual (estado 0),
+    # no aborta la sonda.
+    assert report.attempts[0].status == 0
 
 
 def test_run_probe_rejects_unknown_competition(tmp_path) -> None:
