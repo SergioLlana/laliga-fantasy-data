@@ -43,6 +43,7 @@ s3://<bucket>/
     ├── player_mappings.parquet     # ID de cada fuente → ID canónico
     ├── team_mappings.parquet
     ├── player_match_stats.parquet  # una fila por jugador-partido (todas las ligas)
+    ├── player_season_stats.parquet # agregado de eventing por jugador-temporada (SofaScore)
     ├── fantasy_points.parquet      # puntos por jugador-partido y sistema de puntuación
     ├── market_values.parquet       # precio diario en Biwenger + valor Transfermarkt
     ├── transfers.parquet

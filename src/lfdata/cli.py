@@ -129,6 +129,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     transfermarkt.set_defaults(func=_cmd_ingest_transfermarkt)
 
+    sofascore = ingest_sources.add_parser(
+        "sofascore",
+        help="Historial completo de un jugador (bajo demanda, cualquier liga)",
+    )
+    sofascore.add_argument(
+        "--player",
+        required=True,
+        help="Jugador a descargar: canonical_id (p00001), id de SofaScore o nombre",
+    )
+    sofascore.add_argument(
+        "--data",
+        default=os.environ.get("LFDATA_DATA", DEFAULT_DATA_URI),
+        help=f"URI base del almacenamiento (por defecto {DEFAULT_DATA_URI} o $LFDATA_DATA)",
+    )
+    sofascore.add_argument(
+        "--mappings",
+        default=DEFAULT_MAPPINGS_DIR,
+        help=f"Directorio de los ficheros de mappings (por defecto {DEFAULT_MAPPINGS_DIR}/)",
+    )
+    sofascore.set_defaults(func=_cmd_ingest_sofascore)
+
     probe = subparsers.add_parser(
         "probe",
         help="Sondas de diagnóstico de las fuentes (no escriben datos curados)",
@@ -319,6 +340,15 @@ def _cmd_ingest_transfermarkt(args: argparse.Namespace) -> int:
         since_days=args.since_days,
     )
     return _report_ingest(result, args.competition, args.data)
+
+
+def _cmd_ingest_sofascore(args: argparse.Namespace) -> int:
+    from lfdata.sources.sofascore import ingest_player
+    from lfdata.storage import Storage
+
+    storage = Storage(args.data)
+    result = ingest_player(storage, args.player, mappings_dir=args.mappings)
+    return _report_ingest(result, args.player, args.data)
 
 
 def _cmd_probe_biwenger_quota(args: argparse.Namespace) -> int:
