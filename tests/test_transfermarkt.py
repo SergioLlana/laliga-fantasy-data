@@ -438,6 +438,55 @@ def test_partial_run_never_retires(storage: Storage) -> None:
     assert 999999 in set(storage.curated.read_table("transfermarkt_players")["id"])
 
 
+class Fail502OnSquadTransport(RoutingTransport):
+    """Como RoutingTransport, pero devuelve 502 en la plantilla del club N-ésimo."""
+
+    def __init__(self, routes: dict[str, bytes], *, fail_on_fetch: int) -> None:
+        super().__init__(routes)
+        self.fail_on_fetch = fail_on_fetch
+        self.squad_fetches = 0
+
+    def get(self, url: str, params=None) -> bytes:
+        if "kader/verein" in url:
+            self.squad_fetches += 1
+            if self.squad_fetches == self.fail_on_fetch:
+                raise SourceHTTPError(url, 502)
+        return super().get(url, params)
+
+
+def test_ingest_502_on_squad_skips_club_and_curates_rest(storage: Storage) -> None:
+    # La plantilla del segundo club da 502: se salta y se registra como fallo,
+    # pero el primero se curó igual (no aborta el run entero).
+    transport = Fail502OnSquadTransport(default_routes(), fail_on_fetch=2)
+    result = ingest_squads(storage, "la-liga", season=2025, transport=transport, max_clubs=2)
+
+    assert len(result.failures) == 1
+    assert result.failures[0].status == 502
+    assert result.failures[0].player.startswith("club ")
+    players = storage.curated.read_table("transfermarkt_players")
+    assert len(players) == 39  # solo el primer club (ambos comparten la fixture)
+
+
+def test_squad_failure_skips_retirement_in_full_refresh(storage: Storage) -> None:
+    # Siembra la partición y un fantasma que un refresh limpio retiraría.
+    ingest_squads(
+        storage, "la-liga", season=2025, transport=RoutingTransport(default_routes()), max_clubs=1
+    )
+    partition = {"competition": "la-liga"}
+    seeded = storage.curated.read_table("transfermarkt_players")
+    phantom = seeded.iloc[[0]].copy()
+    phantom["id"] = 999999
+    storage.curated.upsert_table("transfermarkt_players", phantom, key="id", partition=partition)
+
+    # Refresh completo donde la primera plantilla falla: se omite la retirada,
+    # así un 502 transitorio no borra a jugadores que no se pudieron ver.
+    transport = Fail502OnSquadTransport(default_routes(), fail_on_fetch=1)
+    result = ingest_squads(storage, "la-liga", season=2025, transport=transport)
+
+    assert any(f.status == 502 for f in result.failures)
+    assert 999999 in set(storage.curated.read_table("transfermarkt_players")["id"])
+
+
 def test_cli_ingest_404_exit_code(tmp_path: Path, monkeypatch, capsys) -> None:
     routes = default_routes()
 
