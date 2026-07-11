@@ -30,6 +30,13 @@ uv run lfdata ingest transfermarkt --competition segunda-division --max-clubs 2
 # cualquier liga (por nombre, id de SofaScore o canonical_id ya mapeado)
 uv run lfdata ingest sofascore --player "Alex Fores"
 uv run lfdata ingest sofascore --player 1086128
+
+# Backfill de SofaScore por liga-temporada (calendario → alineaciones); reanudable,
+# --max-matches acota una prueba (--season es el id de temporada de SofaScore)
+uv run lfdata backfill sofascore --competition la-liga --season 77559 --max-matches 5
+
+# Informe de cruce de minutos SofaScore ↔ Biwenger (tolerancia 10 pp, umbral 95)
+uv run lfdata crosscheck sofascore-biwenger-minutes --out crosscheck.json
 ```
 
 Los datos se escriben en dos capas bajo la URI de `--data` (por defecto `file://./data`, configurable con `$LFDATA_DATA`): la respuesta cruda tal cual en `raw/` y tablas Parquet en `curated/`, legibles con pandas o DuckDB. Biwenger produce `biwenger_players` y `biwenger_teams`; Transfermarkt produce `transfermarkt_players`, `market_values_tm`, `transfers`, `availability_tm` (disponibilidad por partido) e `injuries_tm` (historial de lesiones), aún con IDs de Transfermarkt, a la espera del paso de mapping a IDs canónicos. SofaScore produce `player_season_stats` (agregado de 115 campos por jugador-temporada) y `player_match_stats` (nota y métricas de evento por jugador-partido: minutos, pases, remates, goles, asistencias, xG…); cada fila lleva su `canonical_id` si el id de SofaScore ya está mapeado y, si no, el jugador queda encolado en `mappings/sofascore-review.csv`.

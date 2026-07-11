@@ -134,3 +134,74 @@ class RatingsResponse(_SofaModel):
 
 class EventPlayerStatisticsResponse(_SofaModel):
     statistics: dict[str, Any] = Field(default_factory=dict)
+
+
+# --- Calendario del torneo: unique-tournament/{ut}/season/{sid}/events/last/{n}
+#
+# Eventos (partidos) de la liga-temporada, paginados hacia atrás. Cada evento
+# trae los dos equipos, el estado (solo interesan los ``finished``) y la fecha.
+# Es el punto de entrada del backfill: de aquí salen los eventId cuyas
+# alineaciones se piden una a una.
+
+
+class EventTeam(_SofaModel):
+    id: int
+    name: str
+    slug: str | None = None
+
+
+class EventStatus(_SofaModel):
+    # ``type`` es "finished" / "notstarted" / "inprogress" / "canceled"...
+    type: str | None = None
+
+
+class CalendarEvent(_SofaModel):
+    id: int
+    start_timestamp: int | None = Field(alias="startTimestamp", default=None)
+    status: EventStatus = Field(default_factory=EventStatus)
+    home_team: EventTeam = Field(alias="homeTeam")
+    away_team: EventTeam = Field(alias="awayTeam")
+    has_event_player_statistics: bool | None = Field(
+        alias="hasEventPlayerStatistics", default=None
+    )
+
+    @property
+    def finished(self) -> bool:
+        return self.status.type == "finished"
+
+
+class EventsResponse(_SofaModel):
+    events: list[CalendarEvent] = Field(default_factory=list)
+    has_next_page: bool = Field(alias="hasNextPage", default=False)
+
+
+# --- Alineaciones de un partido: event/{id}/lineups -------------------------
+#
+# Cada lado (home/away) trae sus jugadores con la estadística de evento
+# **embebida** en ``statistics``: una sola petición por partido da a los 22+
+# jugadores, sin pedir el detalle jugador a jugador. Un suplente que no jugó
+# llega sin ``statistics`` (dict vacío) y la ingesta lo salta.
+
+
+class LineupPlayerRef(_SofaModel):
+    id: int | None = None
+    name: str | None = None
+    slug: str | None = None
+
+
+class LineupPlayer(_SofaModel):
+    player: LineupPlayerRef = Field(default_factory=LineupPlayerRef)
+    team_id: int | None = Field(alias="teamId", default=None)
+    position: str | None = None
+    substitute: bool | None = None
+    statistics: dict[str, Any] = Field(default_factory=dict)
+
+
+class LineupSide(_SofaModel):
+    players: list[LineupPlayer] = Field(default_factory=list)
+
+
+class LineupsResponse(_SofaModel):
+    confirmed: bool | None = None
+    home: LineupSide = Field(default_factory=LineupSide)
+    away: LineupSide = Field(default_factory=LineupSide)

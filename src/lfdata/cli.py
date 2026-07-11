@@ -13,6 +13,9 @@ from lfdata.sources.transfermarkt import DEFAULT_SEASON
 DEFAULT_DATA_URI = "file://./data"
 DEFAULT_MAPPINGS_DIR = "mappings"
 
+# Id de torneo (unique-tournament) de SofaScore por competición.
+SOFASCORE_TOURNAMENTS = {"la-liga": 8, "segunda-division": 54}
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -149,6 +152,83 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Directorio de los ficheros de mappings (por defecto {DEFAULT_MAPPINGS_DIR}/)",
     )
     sofascore.set_defaults(func=_cmd_ingest_sofascore)
+
+    backfill = subparsers.add_parser(
+        "backfill", help="Backfill masivo por liga-temporada (histórico)"
+    )
+    backfill_sources = backfill.add_subparsers(dest="source", title="fuentes", required=True)
+
+    bf_sofascore = backfill_sources.add_parser(
+        "sofascore",
+        help="Eventing por jugador-partido de una liga-temporada (calendario→alineaciones)",
+    )
+    bf_sofascore.add_argument(
+        "--competition",
+        required=True,
+        choices=tuple(SOFASCORE_TOURNAMENTS),
+        help="Competición a backfillear",
+    )
+    bf_sofascore.add_argument(
+        "--season",
+        type=int,
+        required=True,
+        help="Id de temporada de SofaScore (p. ej. 77559 = LaLiga 25/26)",
+    )
+    bf_sofascore.add_argument(
+        "--season-year",
+        default=None,
+        help="Etiqueta de la temporada (p. ej. 25/26); solo informativa en las filas",
+    )
+    bf_sofascore.add_argument(
+        "--max-matches",
+        type=int,
+        default=None,
+        help="Limita el número de partidos nuevos descargados (prueba parcial)",
+    )
+    bf_sofascore.add_argument(
+        "--max-pages",
+        type=int,
+        default=None,
+        help="Limita las páginas del calendario recorridas (prueba parcial)",
+    )
+    bf_sofascore.add_argument(
+        "--data",
+        default=os.environ.get("LFDATA_DATA", DEFAULT_DATA_URI),
+        help=f"URI base del almacenamiento (por defecto {DEFAULT_DATA_URI} o $LFDATA_DATA)",
+    )
+    bf_sofascore.add_argument(
+        "--mappings",
+        default=DEFAULT_MAPPINGS_DIR,
+        help=f"Directorio de los ficheros de mappings (por defecto {DEFAULT_MAPPINGS_DIR}/)",
+    )
+    bf_sofascore.set_defaults(func=_cmd_backfill_sofascore)
+
+    crosscheck = subparsers.add_parser(
+        "crosscheck",
+        help="Informes de validación cruzada entre fuentes (no escriben datos curados)",
+    )
+    crosscheck_targets = crosscheck.add_subparsers(dest="target", title="cruces", required=True)
+
+    minutes = crosscheck_targets.add_parser(
+        "sofascore-biwenger-minutes",
+        help="Compara los minutos de SofaScore con los de Biwenger (tolerancia 10 pp, umbral 95)",
+    )
+    minutes.add_argument(
+        "--data",
+        default=os.environ.get("LFDATA_DATA", DEFAULT_DATA_URI),
+        help=f"URI base del almacenamiento (por defecto {DEFAULT_DATA_URI} o $LFDATA_DATA)",
+    )
+    minutes.add_argument(
+        "--mappings",
+        default=DEFAULT_MAPPINGS_DIR,
+        help=f"Directorio de los ficheros de mappings (por defecto {DEFAULT_MAPPINGS_DIR}/)",
+    )
+    minutes.add_argument(
+        "--out",
+        default="crosscheck-sofascore-biwenger-minutes.json",
+        help="Ruta del informe JSON",
+    )
+    minutes.set_defaults(func=_cmd_crosscheck_minutes)
 
     probe = subparsers.add_parser(
         "probe",
@@ -349,6 +429,40 @@ def _cmd_ingest_sofascore(args: argparse.Namespace) -> int:
     storage = Storage(args.data)
     result = ingest_player(storage, args.player, mappings_dir=args.mappings)
     return _report_ingest(result, args.player, args.data)
+
+
+def _cmd_backfill_sofascore(args: argparse.Namespace) -> int:
+    from lfdata.sources.sofascore import backfill_league_season
+    from lfdata.storage import Storage
+
+    storage = Storage(args.data)
+    result = backfill_league_season(
+        storage,
+        SOFASCORE_TOURNAMENTS[args.competition],
+        args.season,
+        season_year=args.season_year,
+        max_matches=args.max_matches,
+        max_pages=args.max_pages,
+        mappings_dir=args.mappings,
+    )
+    return _report_ingest(result, f"{args.competition} {args.season}", args.data)
+
+
+def _cmd_crosscheck_minutes(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from lfdata.sources.sofascore import crossvalidate_minutes
+    from lfdata.storage import Storage
+
+    storage = Storage(args.data)
+    report = crossvalidate_minutes(storage, mappings_dir=args.mappings)
+    out_path = Path(args.out)
+    report.save(out_path)
+    print(report.summary())
+    print(f"Informe en {out_path}")
+    # "por debajo del umbral" da código 1 para que un run desatendido lo detecte;
+    # 0 filas comunes no es un fallo del cruce (falta el matching), así que no.
+    return 1 if report.common_rows > 0 and not report.passes else 0
 
 
 def _cmd_probe_biwenger_quota(args: argparse.Namespace) -> int:
