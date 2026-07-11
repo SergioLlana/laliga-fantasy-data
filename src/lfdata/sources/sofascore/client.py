@@ -14,6 +14,8 @@ from pydantic import ValidationError
 from lfdata.sources.http import HttpTransport
 from lfdata.sources.sofascore.models import (
     EventPlayerStatisticsResponse,
+    EventsResponse,
+    LineupsResponse,
     OverallStatisticsResponse,
     RatingsResponse,
     SearchResponse,
@@ -96,6 +98,25 @@ class SofaScoreClient:
         url = f"{API_BASE}/event/{event_id}/player/{player_id}/statistics"
         payload = self._get(url, "event-player-stats", f"{event_id}-{player_id}")
         return self._validate(EventPlayerStatisticsResponse, payload, url)
+
+    def fetch_events(
+        self, tournament_id: int, season_id: int, page: int = 0
+    ) -> EventsResponse:
+        """Una página del calendario de partidos pasados de una liga-temporada."""
+        url = (
+            f"{API_BASE}/unique-tournament/{tournament_id}/season/{season_id}"
+            f"/events/last/{page}"
+        )
+        payload = self._get(
+            url, "tournament-events", f"{tournament_id}-{season_id}-last-{page}"
+        )
+        return self._validate(EventsResponse, payload, url)
+
+    def fetch_lineups(self, event_id: int) -> LineupsResponse:
+        """Alineaciones de un partido con la estadística de evento por jugador."""
+        url = f"{API_BASE}/event/{event_id}/lineups"
+        payload = self._get(url, "event-lineups", str(event_id))
+        return self._validate(LineupsResponse, payload, url)
 
 
 def _slug(text: str) -> str:

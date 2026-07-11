@@ -12,7 +12,13 @@ import pandas as pd
 import pytest
 
 from lfdata.sources.http import SourceHTTPError
-from lfdata.sources.sofascore import SofaScoreClient, SourceFormatError, ingest_player
+from lfdata.sources.sofascore import (
+    SofaScoreClient,
+    SourceFormatError,
+    backfill_league_season,
+    crossvalidate_minutes,
+    ingest_player,
+)
 from lfdata.storage import Storage
 
 FIXTURES = Path(__file__).parent / "fixtures" / "sofascore"
@@ -192,3 +198,133 @@ def test_mapped_player_gets_canonical_id_and_no_review(tmp_path):
     season = storage.curated.read_table("player_season_stats")
     assert (season["canonical_id"] == "p00001").all()
     assert not (mappings / "sofascore-review.csv").exists()
+
+
+# --- backfill por liga-temporada --------------------------------------------
+
+
+def backfill_routes() -> dict[str, bytes]:
+    return {
+        "events/last/0": fixture("events-8-77559-last-0.json"),
+        "/lineups": fixture("lineups.json"),
+    }
+
+
+def test_backfill_writes_a_row_per_player_per_match(tmp_path):
+    storage = storage_at(tmp_path)
+    result = backfill_league_season(
+        storage,
+        8,
+        77559,
+        season_year="25/26",
+        mappings_dir=str(tmp_path / "mappings"),
+        transport=RoutingTransport(backfill_routes()),
+    )
+
+    # Dos partidos en la fixture, 46 jugadores con estadística cada uno.
+    assert result.stats["partidos"] == 2
+    assert result.rows["player_match_stats"] == 92
+
+    matches = storage.curated.read_table("player_match_stats")
+    assert len(matches) == 92
+    assert {True, False} <= set(matches["is_home"])
+    assert matches["opponent"].notna().all()
+    assert (matches["source"] == "sofascore").all()
+    assert (matches["canonical_id"] == "").all()
+
+
+def test_backfill_is_resumable_by_raw_presence(tmp_path):
+    storage = storage_at(tmp_path)
+    mappings = str(tmp_path / "mappings")
+    routes = backfill_routes()
+    backfill_league_season(
+        storage, 8, 77559, mappings_dir=mappings, transport=RoutingTransport(routes)
+    )
+
+    again = backfill_league_season(
+        storage, 8, 77559, mappings_dir=mappings, transport=RoutingTransport(routes)
+    )
+    # Segunda pasada: los partidos ya están en raw/, no se re-descargan.
+    assert again.stats["partidos"] == 0
+    assert again.stats["partidos_saltados"] == 2
+    assert again.rows["player_match_stats"] == 0
+    assert len(storage.curated.read_table("player_match_stats")) == 92
+
+
+def test_backfill_respects_max_matches(tmp_path):
+    storage = storage_at(tmp_path)
+    result = backfill_league_season(
+        storage,
+        8,
+        77559,
+        max_matches=1,
+        mappings_dir=str(tmp_path / "mappings"),
+        transport=RoutingTransport(backfill_routes()),
+    )
+    assert result.stats["partidos"] == 1
+    assert result.rows["player_match_stats"] == 46
+
+
+# --- cruce de minutos vs Biwenger -------------------------------------------
+
+
+def _seed_crosscheck(tmp_path, sofascore_minutes, biwenger_minutes):
+    """Siembra player_match_stats (SofaScore) y fantasy_points (Biwenger) + mapping."""
+    storage = storage_at(tmp_path)
+    so = pd.DataFrame(
+        [
+            {"canonical_id": "p00001", "source": "sofascore", "date": d, "minutes": m}
+            for d, m in sofascore_minutes
+        ]
+    )
+    storage.curated.write_table(
+        "player_match_stats", so, partition={"competition": "8", "season": "77559"}
+    )
+    bi = pd.DataFrame(
+        [{"player_id": 111, "date": d, "minutes": m} for d, m in biwenger_minutes]
+    )
+    storage.curated.write_table(
+        "fantasy_points", bi, partition={"competition": "la-liga", "season": "2025"}
+    )
+    mappings = tmp_path / "mappings"
+    mappings.mkdir()
+    pd.DataFrame(
+        [
+            {
+                "canonical_id": "p00001",
+                "fuente": "biwenger",
+                "id_en_fuente": "111",
+                "metodo": "manual",
+                "fecha": "2026-07-11",
+            }
+        ]
+    ).to_csv(mappings / "players.csv", index=False)
+    return storage, str(mappings)
+
+
+def test_crosscheck_flags_minutes_discrepancies(tmp_path):
+    storage, mappings = _seed_crosscheck(
+        tmp_path,
+        sofascore_minutes=[("2025-05-10", 90), ("2025-05-17", 90)],
+        biwenger_minutes=[("2025-05-10", 88), ("2025-05-17", 50)],
+    )
+    report = crossvalidate_minutes(storage, mappings_dir=mappings)
+    assert report.common_rows == 2
+    assert report.within_tolerance == 1  # 90 vs 88 entra; 90 vs 50 no
+    assert not report.passes
+    assert report.discrepancies[0]["minutes_biwenger"] == 50
+
+
+def test_crosscheck_without_mappings_reports_zero_common(tmp_path):
+    storage = storage_at(tmp_path)
+    storage.curated.write_table(
+        "player_match_stats",
+        pd.DataFrame(
+            [{"canonical_id": "", "source": "sofascore", "date": "2025-05-10", "minutes": 90}]
+        ),
+        partition={"competition": "8", "season": "77559"},
+    )
+    report = crossvalidate_minutes(storage, mappings_dir=str(tmp_path / "mappings"))
+    assert report.common_rows == 0
+    assert not report.passes
+    assert "0 filas comunes" in report.summary()

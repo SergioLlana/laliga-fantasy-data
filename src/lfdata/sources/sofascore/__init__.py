@@ -11,13 +11,17 @@ from lfdata.sources.sofascore.client import (
     SofaScoreClient,
     SourceFormatError,
 )
-from lfdata.sources.sofascore.ingest import ingest_player
+from lfdata.sources.sofascore.crossvalidate import CrossCheckReport, crossvalidate_minutes
+from lfdata.sources.sofascore.ingest import backfill_league_season, ingest_player
 
 __all__ = [
     "API_BASE",
     "PROXY_OVERFLOW",
     "WAIT_SECONDS",
+    "CrossCheckReport",
     "SofaScoreClient",
     "SourceFormatError",
+    "backfill_league_season",
+    "crossvalidate_minutes",
     "ingest_player",
 ]
