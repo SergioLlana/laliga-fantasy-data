@@ -18,6 +18,8 @@ from lfdata.sources.sofascore import (
     backfill_league_season,
     crossvalidate_minutes,
     ingest_player,
+    resolve_season_id,
+    season_year_label,
 )
 from lfdata.storage import Storage
 
@@ -208,6 +210,26 @@ def backfill_routes() -> dict[str, bytes]:
         "events/last/0": fixture("events-8-77559-last-0.json"),
         "/lineups": fixture("lineups.json"),
     }
+
+
+def test_season_year_label_uses_start_year():
+    # 2025 = temporada 2025/26, como en Transfermarkt.
+    assert season_year_label(2025) == "25/26"
+    assert season_year_label(2021) == "21/22"
+
+
+def test_resolve_season_id_maps_start_year_to_sofascore_id(tmp_path):
+    routes = {"unique-tournament/8/seasons": fixture("tournament-seasons-8.json")}
+    client = SofaScoreClient(RoutingTransport(routes), storage_at(tmp_path).raw)
+    assert resolve_season_id(client, 8, 2025) == 77559  # 25/26
+    assert resolve_season_id(client, 8, 2024) == 61643  # 24/25
+
+
+def test_resolve_season_id_rejects_unknown_year(tmp_path):
+    routes = {"unique-tournament/8/seasons": fixture("tournament-seasons-8.json")}
+    client = SofaScoreClient(RoutingTransport(routes), storage_at(tmp_path).raw)
+    with pytest.raises(ValueError, match="30/31"):
+        resolve_season_id(client, 8, 2030)
 
 
 def test_backfill_writes_a_row_per_player_per_match(tmp_path):

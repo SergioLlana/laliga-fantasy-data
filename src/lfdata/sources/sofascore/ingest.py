@@ -227,6 +227,60 @@ def backfill_league_season(
     return result
 
 
+def backfill_league_season_for_year(
+    storage: Storage,
+    tournament_id: int,
+    year: int,
+    *,
+    max_matches: int | None = None,
+    max_pages: int | None = None,
+    mappings_dir: str = "mappings",
+    transport: HttpTransport | None = None,
+) -> IngestResult:
+    """Backfill de una liga-temporada indicando el **año de inicio** (2025 = 2025/26).
+
+    Resuelve el año al id de temporada opaco de SofaScore y delega en
+    :func:`backfill_league_season`. La convención (año de inicio) es la misma que
+    usa Transfermarkt, para que ``--season 2025`` signifique 2025/26 en todas las
+    fuentes.
+    """
+    transport = transport or HttpTransport(
+        wait_seconds=WAIT_SECONDS,
+        overflow_proxy=scrapeops_proxy_from_env(enabled=PROXY_OVERFLOW),
+    )
+    client = SofaScoreClient(transport, storage.raw)
+    season_id = resolve_season_id(client, tournament_id, year)
+    return backfill_league_season(
+        storage,
+        tournament_id,
+        season_id,
+        season_year=season_year_label(year),
+        max_matches=max_matches,
+        max_pages=max_pages,
+        mappings_dir=mappings_dir,
+        transport=transport,
+    )
+
+
+def season_year_label(year: int) -> str:
+    """Año de inicio → etiqueta estilo SofaScore: 2025 → ``25/26``."""
+    return f"{year % 100:02d}/{(year + 1) % 100:02d}"
+
+
+def resolve_season_id(client: SofaScoreClient, tournament_id: int, year: int) -> int:
+    """Id de temporada de SofaScore para un año de inicio (2025 → temporada 25/26)."""
+    target = season_year_label(year)
+    seasons = client.fetch_tournament_seasons(tournament_id).seasons
+    for season in seasons:
+        if season.year == target:
+            return season.id
+    available = ", ".join(s.year for s in seasons if s.year) or "(ninguna)"
+    raise ValueError(
+        f"SofaScore no tiene la temporada {target} (año {year}) para el torneo "
+        f"{tournament_id}. Disponibles: {available}."
+    )
+
+
 def _finished_events(
     client: SofaScoreClient, tournament_id: int, season_id: int, max_pages: int | None
 ) -> list[CalendarEvent]:

@@ -32,8 +32,8 @@ uv run lfdata ingest sofascore --player "Alex Fores"
 uv run lfdata ingest sofascore --player 1086128
 
 # Backfill de SofaScore por liga-temporada (calendario → alineaciones); reanudable,
-# --max-matches acota una prueba (--season es el id de temporada de SofaScore)
-uv run lfdata backfill sofascore --competition la-liga --season 77559 --max-matches 5
+# --max-matches acota una prueba (--season es el año de inicio: 2025 = 2025/26)
+uv run lfdata backfill sofascore --competition la-liga --season 2025 --max-matches 5
 
 # Informe de cruce de minutos SofaScore ↔ Biwenger (tolerancia 10 pp, umbral 95)
 uv run lfdata crosscheck sofascore-biwenger-minutes --out crosscheck.json

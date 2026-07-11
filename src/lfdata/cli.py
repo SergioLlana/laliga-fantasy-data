@@ -172,12 +172,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--season",
         type=int,
         required=True,
-        help="Id de temporada de SofaScore (p. ej. 77559 = LaLiga 25/26)",
-    )
-    bf_sofascore.add_argument(
-        "--season-year",
-        default=None,
-        help="Etiqueta de la temporada (p. ej. 25/26); solo informativa en las filas",
+        help="Año de inicio de la temporada (2025 = 2025/26), como en las demás fuentes",
     )
     bf_sofascore.add_argument(
         "--max-matches",
@@ -432,15 +427,14 @@ def _cmd_ingest_sofascore(args: argparse.Namespace) -> int:
 
 
 def _cmd_backfill_sofascore(args: argparse.Namespace) -> int:
-    from lfdata.sources.sofascore import backfill_league_season
+    from lfdata.sources.sofascore import backfill_league_season_for_year
     from lfdata.storage import Storage
 
     storage = Storage(args.data)
-    result = backfill_league_season(
+    result = backfill_league_season_for_year(
         storage,
         SOFASCORE_TOURNAMENTS[args.competition],
         args.season,
-        season_year=args.season_year,
         max_matches=args.max_matches,
         max_pages=args.max_pages,
         mappings_dir=args.mappings,

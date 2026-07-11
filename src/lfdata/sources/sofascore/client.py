@@ -20,6 +20,7 @@ from lfdata.sources.sofascore.models import (
     RatingsResponse,
     SearchResponse,
     SeasonsResponse,
+    TournamentSeasonsResponse,
 )
 from lfdata.storage import RawStore
 
@@ -98,6 +99,12 @@ class SofaScoreClient:
         url = f"{API_BASE}/event/{event_id}/player/{player_id}/statistics"
         payload = self._get(url, "event-player-stats", f"{event_id}-{player_id}")
         return self._validate(EventPlayerStatisticsResponse, payload, url)
+
+    def fetch_tournament_seasons(self, tournament_id: int) -> TournamentSeasonsResponse:
+        """Todas las temporadas de un torneo (para resolver año → id de temporada)."""
+        url = f"{API_BASE}/unique-tournament/{tournament_id}/seasons"
+        payload = self._get(url, "tournament-seasons", str(tournament_id))
+        return self._validate(TournamentSeasonsResponse, payload, url)
 
     def fetch_events(
         self, tournament_id: int, season_id: int, page: int = 0
