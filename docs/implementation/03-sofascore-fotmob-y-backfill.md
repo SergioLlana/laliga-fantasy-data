@@ -38,9 +38,11 @@ IDs de torneo relevantes: La Liga 8, LaLiga2 54, Premier 17, Serie A 23, Bundesl
 
 `lfdata ingest sofascore --player {canonical_id|nombre}`: busca al jugador, descarga todas sus temporadas disponibles (cualquier liga, incluida Primera Federación o Brasileirão) y las cura. Se lanza automáticamente cuando el pipeline detecta en Biwenger un jugador nuevo sin historial curado.
 
-### Tabla curada principal
+### Tablas curadas
 
-`player_match_stats` — grano jugador-partido, todas las ligas: canonical_id (si ya está mapeado; si no, id SofaScore pendiente), torneo, temporada, fecha, club del partido, rival, local/visitante, minutos, nota, goles, asistencias, tiros, pases clave, duelos, xG (nulo donde SofaScore no lo da, p. ej. LaLiga2), fuente.
+`player_match_stats` — grano jugador-partido, todas las ligas: canonical_id (si ya está mapeado; si no, vacío y el jugador queda encolado en `mappings/sofascore-review.csv`, con `sofascore_player_id` siempre presente), torneo, temporada, fecha, rival, local/visitante, nota y **métricas de evento por partido** (minutos, pases, pases acertados, remates, remates a puerta, goles, asistencias, centros, toques, recuperaciones, xG/xA — nulo donde SofaScore no lo da, p. ej. LaLiga2, fuente). En el modo bajo demanda las métricas por partido salen de `event/{id}/player/{id}/statistics` (una petición por partido); SofaScore omite los campos a cero, así que un conteo ausente es cero.
+
+`player_season_stats` — grano jugador-temporada: el agregado de 115 campos que da `statistics/overall` (minutos, nota media, goles, xG, pases clave…). Es el insumo directo del baseline de fichajes (paso 5). Mismas claves de identidad que `player_match_stats`.
 
 ## Volumen y ritmo del backfill
 
