@@ -203,6 +203,29 @@ def test_player_reports_contract_segunda_has_no_sofascore(storage: Storage) -> N
     assert all("5" not in report.points and "6" not in report.points for report in scored)
 
 
+def test_player_reports_season_is_start_year_translated_to_biwenger_end_year(
+    storage: Storage, tmp_path: Path
+) -> None:
+    """``season`` es el año de inicio (2025 = 2025/26); la API se pide con año+1."""
+
+    class CapturingTransport:
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+            self.params: dict | None = None
+
+        def get(self, url, params=None) -> bytes:
+            self.params = params
+            return self.payload
+
+    transport = CapturingTransport(PLAYER_LA_LIGA.read_bytes())
+    BiwengerClient(transport, storage.raw).fetch_player_reports("la-liga", "alex-fores", "2025")
+
+    # La URL usa el año de fin de Biwenger (2025/26 -> season=2026)...
+    assert transport.params["season"] == "2026"
+    # ...pero el raw se nombra con el año de inicio, coherente con la partición.
+    assert any("alex-fores-2025" in p.name for p in raw_files(tmp_path))
+
+
 def test_player_reports_raw_written_before_interpreting(storage: Storage, tmp_path: Path) -> None:
     transport = FakeTransport(b'{"status": 200, "data": {"esto": "mal"}}')
     with pytest.raises(SourceFormatError, match="cambió la forma"):

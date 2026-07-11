@@ -37,7 +37,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     biwenger.add_argument(
         "--season",
-        help="Temporada (p. ej. 2026). Si se indica, añade fantasy_points y biwenger_prices",
+        help=(
+            "Año de inicio de la temporada (2025 = 2025/26), como en las demás fuentes. "
+            "Si se indica, añade fantasy_points y biwenger_prices"
+        ),
     )
     biwenger.add_argument(
         "--delta",
@@ -84,7 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
     rounds.add_argument(
         "--season",
         required=True,
-        help="Temporada de Biwenger (p. ej. 2025 = 2024/2025)",
+        help="Año de inicio de la temporada (2025 = 2025/26), como en las demás fuentes",
     )
     rounds.add_argument(
         "--resume",
