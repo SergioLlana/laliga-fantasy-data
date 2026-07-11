@@ -8,11 +8,14 @@ registra cuánto tardó la ventana en reponerse. Opcionalmente, tras la recupera
 sigue pidiendo para contar cuántas peticiones admite hasta el siguiente corte.
 
 Sondea el **detalle por jugador** (``players/{competition}/{slug}``, con
-``fields=id``) rotando entre los slugs de la plantilla: es el endpoint que el
-backfill usa y —al ser una URL única por slug— el que Cloudflare no cachea, así
-que su 200/429 refleja la cuota real del origen. La plantilla
-(``competitions/.../data``) NO sirve como sonda: la sirve el edge de Cloudflare
-desde caché con 200 aunque el origen esté a 429 (verificado el 2026-07-11).
+``fields=id`` y un **parámetro cache-buster único por petición**): es el endpoint
+que el backfill usa, y el cache-buster garantiza que Cloudflare lo sirva siempre
+desde el origen (``cf-cache-status: BYPASS``), así que su 200/429 refleja la cuota
+real. Sin el cache-buster NO sirve: Cloudflare cachea el detalle **por slug** y
+devuelve un 200 desde caché aunque el origen esté a 429 (verificado el 2026-07-11:
+la sonda veía 200 en los primeros slugs del roster —cacheados— mientras el backfill
+recibía 429 a la vez). La plantilla (``competitions/.../data``) tiene el mismo
+problema de caché y por eso tampoco vale como sonda.
 
 El resultado decide si el post-jornada puede ir en tandas directas espaciadas
 (0 créditos) o necesita el desbordamiento a proxy.
@@ -34,6 +37,7 @@ import itertools
 import json
 import logging
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -44,20 +48,27 @@ from lfdata.sources.http import BLOCK_STATUSES
 
 logger = logging.getLogger(__name__)
 
-# Petición de sondeo: el detalle por jugador (players/{competition}/{slug}). Es el
-# endpoint que usa el backfill y —clave— el que refleja la cuota real: al ser una
-# URL única por slug, Cloudflare NO lo cachea, así que su 200/429 delata el estado
-# del origen. La plantilla (competitions/.../data), en cambio, la sirve el edge de
-# Cloudflare desde caché con 200 aunque el origen esté a 429 (verificado el
-# 2026-07-11: la sonda veía 200 mientras el backfill recibía 429 a la vez) — por eso
-# NO sirve como sonda. La plantilla se usa solo una vez, al arrancar, para obtener
-# slugs válidos; luego se rota entre ellos para que cada sondeo sea una URL nueva
-# (sin caché) y cuente de verdad contra la cuota.
+# Petición de sondeo: el detalle por jugador (players/{competition}/{slug}), que es
+# el endpoint que usa el backfill. CLAVE para que refleje la cuota real: Cloudflare
+# SÍ cachea el detalle por slug (verificado el 2026-07-11: los primeros slugs del
+# roster daban cf-cache-status=HIT y 200 aunque el origen estuviera a 429), así que
+# rotar entre slugs NO basta —los cacheados enmascaran el 429—. Lo que fuerza el
+# origen es el parámetro cache-buster único por petición (CACHE_BUSTER_PARAM): al
+# cambiar la URL en cada sondeo, Cloudflare no encuentra entrada en caché, hace
+# BYPASS al origen y devuelve el 200/429 real (que además cuenta contra la cuota,
+# justo lo que la sonda mide). El roster se pide solo al arrancar, para obtener un
+# slug válido con el que formar la URL.
 PLAYER_PATH = "players/{competition}/{slug}"
 ROSTER_PATH = "competitions/{competition}/data"
 # Payload mínimo (fields=id): la URL sigue contando contra la cuota, que es lo único
 # que la sonda mide; no necesita reports ni precios.
 PROBE_FIELDS = "id"
+# Nombre del parámetro cache-buster. Se rellena con un valor único (uuid) por
+# petición para que Cloudflare nunca sirva el detalle desde caché y todo sondeo
+# llegue al origen. Biwenger ignora parámetros desconocidos, así que no altera la
+# respuesta (verificado el 2026-07-11: con buster el mismo slug pasa de HIT/200 a
+# BYPASS/429).
+CACHE_BUSTER_PARAM = "_"
 DEFAULT_SEASON = "2026"
 
 # Estado sintético cuando la petición ni siquiera llega a Biwenger (timeout o
@@ -384,14 +395,27 @@ def run_probe(
     if competition not in COMPETITIONS:
         raise ValueError(f"Competición desconocida: {competition!r} (usa {COMPETITIONS})")
     session = session or _direct_session()
-    if slugs is None:
-        slugs = _roster_slugs(session, competition)
-    slug_cycle = itertools.cycle(slugs)
+    # Los slugs se resuelven de forma PEREZOSA dentro del bucle, no al arrancar. Si la
+    # plantilla aún da 429 (caché de Cloudflare fría), resolverla aquí mataría una
+    # sonda pensada justamente para esperar a que el 429 se reponga: el fallo de
+    # plantilla lo captura _attempt como un turno perdido (igual que un corte de red)
+    # y se reintenta al siguiente intervalo, hasta que la plantilla vuelva a servirse.
+    slug_cycle = itertools.cycle(slugs) if slugs is not None else None
 
     def request() -> int:
+        nonlocal slug_cycle
+        if slug_cycle is None:
+            slug_cycle = itertools.cycle(_roster_slugs(session, competition, sleep=sleep))
         slug = next(slug_cycle)
         url = f"{API_BASE}/{PLAYER_PATH.format(competition=competition, slug=slug)}"
-        return session.get(url, params={"fields": PROBE_FIELDS, "season": season}).status_code
+        # El cache-buster (uuid único) fuerza un BYPASS al origen: sin él Cloudflare
+        # serviría el detalle desde caché con un 200 stale y la sonda no vería el 429.
+        params = {
+            "fields": PROBE_FIELDS,
+            "season": season,
+            CACHE_BUSTER_PARAM: uuid.uuid4().hex,
+        }
+        return session.get(url, params=params).status_code
 
     def on_attempt(report: ProbeReport, attempt: ProbeAttempt) -> None:
         logger.info(
