@@ -109,8 +109,11 @@ class Report(_BiwengerModel):
     # `home` indica si el equipo del jugador jugaba en casa (local/visitante).
     home: bool | None = None
     match: ReportMatch
-    # Presentes solo cuando el jugador puntuó ese partido.
-    points: dict[str, int] | None = None
+    # Presentes solo cuando el jugador puntuó ese partido. Un sistema concreto
+    # puede venir con valor nulo (visto en La Liga: el sistema 6/Social llega
+    # `null` en algún report aunque los demás traigan puntos); no es un cambio de
+    # forma, así que se admite y la columna correspondiente queda nula.
+    points: dict[str, int | None] | None = None
     raw_stats: RawStats | None = Field(alias="rawStats", default=None)
 
     @property
