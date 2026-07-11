@@ -5,7 +5,7 @@ Biwenger corta con 429 sostenido a las ~200 peticiones por ventana e IP (comprob
 ## Considered Options
 
 - **Proxy siempre activo por fuente** (lo que hacía `PROXY_ENABLED = True`): simple, pero ~1.300+ créditos/mes solo con el incremental de La Liga → plan de pago permanente, y añade 5-37 s de latencia a cada petición sin necesidad.
-- **Solo tandas directas espaciadas** bajo la cuota: coste 0 pero exige caracterizar la duración de la ventana y retrasa los datos una ventana entera; queda como optimización (si la sonda post-429 demuestra ventana corta, el desbordamiento tiende a 0 créditos solo).
+- **Solo tandas directas espaciadas** bajo la cuota: coste 0 pero exige caracterizar la duración de la ventana y retrasa los datos una ventana entera; queda como optimización (si la sonda post-429 demuestra ventana corta, el desbordamiento tiende a 0 créditos solo). La sonda existe: `lfdata probe biwenger-quota` (issue #54, ver docs/handoff-scraping.md §6.3) mide la ventana lanzando una petición ligera por hora, siempre directa, hasta el primer 200. **Conclusión tras la primera ejecución real: _(pendiente de rellenar con la duración medida y la decisión resultante)_.**
 
 ## Consequences
 

@@ -175,6 +175,31 @@ Ordenado por impacto estimado:
    Un run directo en tandas de ~180 espaciadas (esperando a que la ventana se
    reponga) evitaría gastar créditos ScrapeOps por completo. Compensa medir la
    duración real de la ventana (¿por hora?, ¿por día?) — no está caracterizada.
+   **Herramienta:** `lfdata probe biwenger-quota` (issue #54) sondea esto: tras un
+   429 directo lanza una petición ligera por hora hasta un 200 y deja en un JSON
+   los timestamps 429→200 y la duración estimada de la ventana (cota inferior =
+   del primer al último 429 visto; superior = hasta el 200). Va siempre directo
+   (nunca proxy) y no escribe datos curados. `--measure-capacity` cuenta además
+   cuántas peticiones admite hasta el siguiente corte. Corre desatendida y termina
+   al primer 200 o al agotar `--max-hours`.
+
+   **La cuota es un rate-limiter que oscila (verificado el 2026-07-11):** el corte
+   es a la petición ~200 por IP. Dos sutilezas descubiertas al probar la sonda:
+   - **La plantilla `competitions/.../data` la cachea Cloudflare**: devuelve 200
+     desde el edge aunque el origen esté a 429, así que NO refleja la cuota (la
+     sonda la veía "abierta" mientras el backfill recibía 429 a la vez). La sonda
+     mide contra el **detalle por jugador** (`players/.../{slug}`, URL única no
+     cacheable), rotando slugs para que cada sondeo cuente de verdad.
+   - **No se abre de golpe**: a los ~2 min de parar deja colar alguna petición
+     suelta (un 200 aislado) pero vuelve a 429 enseguida; el mensaje de Biwenger
+     dice "vuelva a intentarlo en unas horas". Por eso la sonda **no se fía de un
+     200 aislado**: al primero pide `--confirm-requests` (3 por defecto) seguidas y
+     solo declara la ventana repuesta si todas pasan.
+
+   > **Conclusión de la caracterización:** _(pendiente — rellenar aquí y en ADR 0004
+   > con la duración de reposición que mida la sonda desatendida). ¿Cabe el
+   > post-jornada en tandas directas espaciadas (0 créditos) o necesita el
+   > desbordamiento a proxy?: __._
 4. **Reducir campos / payload.** El `fields=*,reports(...),prices,seasons` de
    Biwenger trae mucho; si la webapp/modelos no usan todo, pedir menos aligera la
    respuesta (y la latencia por proxy, que escala con el tamaño).
