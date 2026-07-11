@@ -359,6 +359,22 @@ def test_reports_with_points_but_no_rawstats_are_counted(storage: Storage) -> No
     assert len(storage.curated.read_table("fantasy_points")) == 1
 
 
+def test_report_with_null_point_system_parses_and_curates(storage: Storage) -> None:
+    # Biwenger sirve en La Liga algún report con un sistema de puntuación en null
+    # (visto: el 6/Social) aunque los demás traigan puntos. No es un cambio de
+    # forma: el report se cura y esa columna queda nula, no revienta la ingesta.
+    detail = _detail_with_reports(
+        [_report(10, points={"1": 2, "2": 3, "3": 1, "5": 4, "6": None}, raw_stats=_FULL_STATS)]
+    )
+    transport = RoutingTransport(_competition_payload("alex-fores"), detail)
+    result = ingest_reports(storage, "la-liga", "2026", transport=transport)
+
+    assert result.rows["fantasy_points"] == 1
+    row = storage.curated.read_table("fantasy_points").iloc[0]
+    assert row["points_as"] == 2
+    assert pd.isna(row["points_social"])
+
+
 def test_cli_ingest_reports_reports_anomaly(tmp_path: Path, monkeypatch, capsys) -> None:
     detail = _detail_with_reports([_report(20, points={"1": 3}, raw_stats=None)])
 
