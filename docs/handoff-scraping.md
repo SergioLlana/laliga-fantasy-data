@@ -183,8 +183,21 @@ Ordenado por impacto estimado:
    cuántas peticiones admite hasta el siguiente corte. Corre desatendida y termina
    al primer 200 o al agotar `--max-hours`.
 
-   > **Conclusión de la primera ejecución real:** _(pendiente — rellenar aquí y en
-   > ADR 0004 tras correr la sonda). Duración medida de la ventana: __. ¿Cabe el
+   **La cuota es un rate-limiter que oscila (verificado el 2026-07-11):** el corte
+   es a la petición ~200 por IP. Dos sutilezas descubiertas al probar la sonda:
+   - **La plantilla `competitions/.../data` la cachea Cloudflare**: devuelve 200
+     desde el edge aunque el origen esté a 429, así que NO refleja la cuota (la
+     sonda la veía "abierta" mientras el backfill recibía 429 a la vez). La sonda
+     mide contra el **detalle por jugador** (`players/.../{slug}`, URL única no
+     cacheable), rotando slugs para que cada sondeo cuente de verdad.
+   - **No se abre de golpe**: a los ~2 min de parar deja colar alguna petición
+     suelta (un 200 aislado) pero vuelve a 429 enseguida; el mensaje de Biwenger
+     dice "vuelva a intentarlo en unas horas". Por eso la sonda **no se fía de un
+     200 aislado**: al primero pide `--confirm-requests` (3 por defecto) seguidas y
+     solo declara la ventana repuesta si todas pasan.
+
+   > **Conclusión de la caracterización:** _(pendiente — rellenar aquí y en ADR 0004
+   > con la duración de reposición que mida la sonda desatendida). ¿Cabe el
    > post-jornada en tandas directas espaciadas (0 créditos) o necesita el
    > desbordamiento a proxy?: __._
 4. **Reducir campos / payload.** El `fields=*,reports(...),prices,seasons` de

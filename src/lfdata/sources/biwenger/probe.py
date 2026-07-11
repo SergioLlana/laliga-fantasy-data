@@ -3,9 +3,16 @@
 Biwenger corta con 429 sostenido a partir de la petición ~200 por ventana e IP;
 la duración de esa ventana ("¿por hora?, ¿por día?") no está caracterizada (ADR
 0004, docs/handoff-scraping.md §6.3). Esta sonda la mide: tras confirmar un 429
-directo, lanza una petición ligera cada hora hasta recibir un 200 y registra
-cuánto tardó la ventana en reponerse. Opcionalmente, tras la recuperación sigue
-pidiendo para contar cuántas peticiones admite hasta el siguiente corte.
+directo, lanza una petición ligera cada hora hasta recibir un 200 sostenido y
+registra cuánto tardó la ventana en reponerse. Opcionalmente, tras la recuperación
+sigue pidiendo para contar cuántas peticiones admite hasta el siguiente corte.
+
+Sondea el **detalle por jugador** (``players/{competition}/{slug}``, con
+``fields=id``) rotando entre los slugs de la plantilla: es el endpoint que el
+backfill usa y —al ser una URL única por slug— el que Cloudflare no cachea, así
+que su 200/429 refleja la cuota real del origen. La plantilla
+(``competitions/.../data``) NO sirve como sonda: la sirve el edge de Cloudflare
+desde caché con 200 aunque el origen esté a 429 (verificado el 2026-07-11).
 
 El resultado decide si el post-jornada puede ir en tandas directas espaciadas
 (0 créditos) o necesita el desbordamiento a proxy.
@@ -23,6 +30,7 @@ Contrato (issue #54):
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import time
@@ -36,12 +44,21 @@ from lfdata.sources.http import BLOCK_STATUSES
 
 logger = logging.getLogger(__name__)
 
-# Petición de sondeo: la plantilla de la competición. Es el endpoint más robusto
-# para "¿está la ventana abierta?" —no depende de un slug o round_id que pueda
-# caducar— y una sola petición por hora hace irrelevante su tamaño. Cuenta contra
-# la cuota igual que cualquier otra, que es lo único que la sonda necesita.
-PROBE_PATH = "competitions/{competition}/data"
-PROBE_PARAMS = {"lang": "es", "score": 1}
+# Petición de sondeo: el detalle por jugador (players/{competition}/{slug}). Es el
+# endpoint que usa el backfill y —clave— el que refleja la cuota real: al ser una
+# URL única por slug, Cloudflare NO lo cachea, así que su 200/429 delata el estado
+# del origen. La plantilla (competitions/.../data), en cambio, la sirve el edge de
+# Cloudflare desde caché con 200 aunque el origen esté a 429 (verificado el
+# 2026-07-11: la sonda veía 200 mientras el backfill recibía 429 a la vez) — por eso
+# NO sirve como sonda. La plantilla se usa solo una vez, al arrancar, para obtener
+# slugs válidos; luego se rota entre ellos para que cada sondeo sea una URL nueva
+# (sin caché) y cuente de verdad contra la cuota.
+PLAYER_PATH = "players/{competition}/{slug}"
+ROSTER_PATH = "competitions/{competition}/data"
+# Payload mínimo (fields=id): la URL sigue contando contra la cuota, que es lo único
+# que la sonda mide; no necesita reports ni precios.
+PROBE_FIELDS = "id"
+DEFAULT_SEASON = "2026"
 
 # Estado sintético cuando la petición ni siquiera llega a Biwenger (timeout o
 # corte de red): no es 200 ni bloqueo, así que la sonda sigue esperando.
@@ -52,6 +69,15 @@ DEFAULT_MAX_HOURS = 24.0
 # Tope de la fase opcional de capacidad: por encima de ~200 la ventana ya debería
 # haber cortado; el tope evita un bucle infinito si no lo hace.
 DEFAULT_MAX_CAPACITY_REQUESTS = 300
+
+# La cuota de Biwenger no se abre de golpe: es un rate-limiter que, tras el corte,
+# deja colar alguna petición suelta (un 200 aislado) minutos antes de reponerse de
+# verdad. Para no declarar "repuesta" por ese *blip*, al primer 200 la sonda pide
+# unas cuantas más seguidas y solo lo da por bueno si TODAS pasan. Verificado el
+# 2026-07-11: tras 429 en la petición ~201, peticiones sueltas devolvían 200 a los
+# ~2 min pero volvían a 429 enseguida.
+DEFAULT_CONFIRM_REQUESTS = 3
+DEFAULT_CONFIRM_WAIT_SECONDS = 5.0
 
 
 @dataclass
@@ -151,8 +177,10 @@ def probe_quota_window(
     measure_capacity: bool = False,
     capacity_wait_seconds: float = WAIT_SECONDS,
     max_capacity_requests: int = DEFAULT_MAX_CAPACITY_REQUESTS,
+    confirm_requests: int = DEFAULT_CONFIRM_REQUESTS,
+    confirm_wait_seconds: float = DEFAULT_CONFIRM_WAIT_SECONDS,
 ) -> ProbeReport:
-    """Sondea ``request`` cada ``interval_seconds`` hasta un 200 o el límite.
+    """Sondea ``request`` cada ``interval_seconds`` hasta un 200 sostenido o el límite.
 
     ``request`` devuelve el código de estado de una petición directa (200, 429,
     403…); se le pasa desde fuera para que los tests inyecten una secuencia y la
@@ -160,9 +188,15 @@ def probe_quota_window(
     con el informe acumulado, para volcar el registro de forma incremental (un
     corte a mitad deja los timestamps ya vistos en disco).
 
-    Con ``measure_capacity``, tras el primer 200 sigue pidiendo (espaciando
-    ``capacity_wait_seconds``) para contar cuántas peticiones admite la ventana
-    recién repuesta antes del siguiente corte (opcional; quema la ventana).
+    Como la cuota es un rate-limiter que oscila, un 200 aislado no basta: tras el
+    primer 200 posterior a un bloqueo, la sonda pide ``confirm_requests`` en total
+    (espaciando ``confirm_wait_seconds``) y solo declara la ventana repuesta si
+    todas pasan. Si alguna vuelve a bloquear, era un *blip*: se registra y la sonda
+    sigue esperando al siguiente intervalo.
+
+    Con ``measure_capacity``, tras confirmar la recuperación sigue pidiendo
+    (espaciando ``capacity_wait_seconds``) para contar cuántas peticiones admite la
+    ventana antes del siguiente corte (opcional; quema la ventana).
     """
     now = now or (lambda: datetime.now(UTC))
     on_attempt = on_attempt or (lambda report, attempt: None)
@@ -172,18 +206,25 @@ def probe_quota_window(
     while True:
         attempt = _attempt(request, now)
         report.attempts.append(attempt)
-        if attempt.status in BLOCK_STATUSES:
-            if report.first_block_at is None:
-                report.first_block_at = attempt.at
-            report.last_block_at = attempt.at
-        if attempt.status == 200:
-            report.outcome = "recovered" if report.first_block_at else "already-open"
-            report.recovered_at = attempt.at
-            if report.outcome == "already-open":
-                report.recovered_at = None
-            on_attempt(report, attempt)
-            break
+        _note_block(report, attempt)
         on_attempt(report, attempt)
+        if attempt.status == 200:
+            if report.first_block_at is None:
+                report.outcome = "already-open"
+                break
+            if _confirm_recovery(
+                request,
+                now=now,
+                sleep=sleep,
+                report=report,
+                on_attempt=on_attempt,
+                confirm_requests=confirm_requests,
+                wait_seconds=confirm_wait_seconds,
+            ):
+                report.outcome = "recovered"
+                report.recovered_at = attempt.at
+                break
+            # Fue un blip: la ventana sigue oscilando. Volver a esperar un intervalo.
         if now() + timedelta(seconds=interval_seconds) > deadline:
             report.outcome = "timed-out"
             break
@@ -212,6 +253,42 @@ def _attempt(request: Callable[[], int], now: Callable[[], datetime]) -> ProbeAt
         )
         status = NETWORK_ERROR_STATUS
     return ProbeAttempt(at=now(), status=status)
+
+
+def _note_block(report: ProbeReport, attempt: ProbeAttempt) -> None:
+    """Actualiza las marcas del bloqueo si el intento fue un 429/403."""
+    if attempt.status in BLOCK_STATUSES:
+        if report.first_block_at is None:
+            report.first_block_at = attempt.at
+        report.last_block_at = attempt.at
+
+
+def _confirm_recovery(
+    request: Callable[[], int],
+    *,
+    now: Callable[[], datetime],
+    sleep: Callable[[float], None],
+    report: ProbeReport,
+    on_attempt: Callable[[ProbeReport, ProbeAttempt], None],
+    confirm_requests: int,
+    wait_seconds: float,
+) -> bool:
+    """¿Es sostenido el 200 recién visto, o un blip del rate-limiter?
+
+    El 200 que dispara la confirmación ya cuenta como el primero, así que pide
+    ``confirm_requests - 1`` más (espaciando ``wait_seconds``). Devuelve ``True``
+    solo si todas pasan; al primer no-200 (bloqueo o corte) devuelve ``False`` y
+    la sonda vuelve a esperar un intervalo.
+    """
+    for _ in range(max(confirm_requests - 1, 0)):
+        sleep(wait_seconds)
+        attempt = _attempt(request, now)
+        report.attempts.append(attempt)
+        _note_block(report, attempt)
+        on_attempt(report, attempt)
+        if attempt.status != 200:
+            return False
+    return True
 
 
 def _measure_capacity(
@@ -253,8 +330,35 @@ def _direct_session():
     return curl_requests.Session(impersonate="chrome", timeout=30.0)
 
 
-def _probe_url(competition: str) -> str:
-    return f"{API_BASE}/{PROBE_PATH.format(competition=competition)}"
+class RosterUnavailableError(Exception):
+    """No se pudo obtener la lista de slugs con la que sondear."""
+
+
+def _roster_slugs(session, competition: str, *, retries: int = 3, sleep=time.sleep) -> list[str]:
+    """Slugs de la plantilla actual, para rotar entre ellos al sondear.
+
+    La plantilla la sirve Cloudflare desde caché, así que suele dar 200 incluso con
+    el origen a 429; aun así se reintenta por si toca un cache-miss. Sin plantilla
+    no hay con qué sondear: se falla claro.
+    """
+    url = f"{API_BASE}/{ROSTER_PATH.format(competition=competition)}"
+    for attempt in range(retries):
+        response = session.get(url, params={"lang": "es", "score": 1})
+        if response.status_code == 200:
+            players = json.loads(response.content)["data"]["players"]
+            return [player["slug"] for player in players.values()]
+        logger.warning(
+            "sonda biwenger %s: plantilla dio HTTP %d al pedir slugs (intento %d/%d)",
+            competition,
+            response.status_code,
+            attempt + 1,
+            retries,
+        )
+        sleep(5.0 * (attempt + 1))
+    raise RosterUnavailableError(
+        f"No se pudo obtener la plantilla de {competition} para sacar slugs de sondeo "
+        "(la caché de Cloudflare debería servirla; reintenta en un momento)."
+    )
 
 
 def run_probe(
@@ -264,21 +368,30 @@ def run_probe(
     interval_seconds: float = DEFAULT_INTERVAL_SECONDS,
     max_hours: float = DEFAULT_MAX_HOURS,
     measure_capacity: bool = False,
+    confirm_requests: int = DEFAULT_CONFIRM_REQUESTS,
+    season: str = DEFAULT_SEASON,
+    slugs: list[str] | None = None,
     session=None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> ProbeReport:
     """Ejecuta la sonda contra Biwenger y deja el registro en ``out_path``.
 
-    Construye una petición directa a la plantilla de ``competition`` y sondea la
-    ventana. El registro se reescribe tras cada intento, de modo que un corte a
-    mitad de las horas de espera conserva los timestamps ya vistos.
+    Sondea el detalle por jugador (endpoint no cacheable, refleja la cuota real)
+    rotando entre los slugs de la plantilla, de modo que cada sondeo es una URL
+    nueva. El registro se reescribe tras cada intento, así un corte a mitad de las
+    horas de espera conserva los timestamps ya vistos.
     """
     if competition not in COMPETITIONS:
         raise ValueError(f"Competición desconocida: {competition!r} (usa {COMPETITIONS})")
     session = session or _direct_session()
-    url = _probe_url(competition)
+    if slugs is None:
+        slugs = _roster_slugs(session, competition)
+    slug_cycle = itertools.cycle(slugs)
 
     def request() -> int:
-        return session.get(url, params=PROBE_PARAMS).status_code
+        slug = next(slug_cycle)
+        url = f"{API_BASE}/{PLAYER_PATH.format(competition=competition, slug=slug)}"
+        return session.get(url, params={"fields": PROBE_FIELDS, "season": season}).status_code
 
     def on_attempt(report: ProbeReport, attempt: ProbeAttempt) -> None:
         logger.info(
@@ -299,9 +412,11 @@ def run_probe(
     )
     report = probe_quota_window(
         request,
+        sleep=sleep,
         interval_seconds=interval_seconds,
         max_hours=max_hours,
         measure_capacity=measure_capacity,
+        confirm_requests=confirm_requests,
         on_attempt=on_attempt,
     )
     _write_report(out_path, competition, report)

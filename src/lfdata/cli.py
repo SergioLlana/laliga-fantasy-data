@@ -143,7 +143,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--competition",
         default="la-liga",
         choices=("la-liga", "segunda-division"),
-        help="Competición cuya plantilla se pide como sondeo (por defecto la-liga)",
+        help="Competición cuyos jugadores se sondean (por defecto la-liga)",
+    )
+    quota.add_argument(
+        "--season",
+        default="2026",
+        help="Temporada del detalle por jugador que se sondea (por defecto 2026)",
     )
     quota.add_argument(
         "--interval-hours",
@@ -158,11 +163,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Límite de horas antes de rendirse sin ver un 200 (por defecto 24)",
     )
     quota.add_argument(
+        "--confirm-requests",
+        type=int,
+        default=3,
+        help=(
+            "Peticiones seguidas que deben pasar tras el primer 200 para dar la ventana por "
+            "repuesta (la cuota oscila: un 200 aislado puede ser un blip; por defecto 3)"
+        ),
+    )
+    quota.add_argument(
         "--measure-capacity",
         action="store_true",
         help=(
-            "Tras el primer 200, sigue pidiendo para contar cuántas peticiones admite la "
-            "ventana hasta el siguiente corte (opcional; quema la ventana recién repuesta)"
+            "Tras confirmar la recuperación, sigue pidiendo para contar cuántas peticiones "
+            "admite la ventana hasta el siguiente corte (opcional; quema la ventana repuesta)"
         ),
     )
     quota.add_argument(
@@ -275,6 +289,8 @@ def _cmd_probe_biwenger_quota(args: argparse.Namespace) -> int:
         interval_seconds=args.interval_hours * 3600.0,
         max_hours=args.max_hours,
         measure_capacity=args.measure_capacity,
+        confirm_requests=args.confirm_requests,
+        season=args.season,
     )
     print(report.summary())
     print(f"Registro en {out_path}")
