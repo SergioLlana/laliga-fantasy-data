@@ -186,6 +186,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
     quota.set_defaults(func=_cmd_probe_biwenger_quota)
 
+    direct = probe_targets.add_parser(
+        "direct-access",
+        help=(
+            "Tarea de humo: lanza peticiones directas a Biwenger y SofaScore y registra "
+            "los códigos (valida que las IPs de datacenter de AWS no están vetadas)"
+        ),
+    )
+    direct.add_argument(
+        "--source",
+        action="append",
+        dest="sources",
+        choices=("biwenger", "sofascore"),
+        help="Fuente a sondear (repetible); por defecto ambas",
+    )
+    direct.add_argument(
+        "--competition",
+        default="la-liga",
+        choices=("la-liga", "segunda-division"),
+        help="Competición cuyos jugadores se sondean en Biwenger (por defecto la-liga)",
+    )
+    direct.add_argument(
+        "--season",
+        default="2026",
+        help="Temporada del detalle por jugador de Biwenger (por defecto 2026)",
+    )
+    direct.add_argument(
+        "--requests",
+        type=int,
+        default=25,
+        help="Peticiones directas por fuente (por defecto 25)",
+    )
+    direct.add_argument(
+        "--wait-seconds",
+        type=float,
+        default=2.0,
+        help="Segundos entre peticiones (por defecto 2)",
+    )
+    direct.add_argument(
+        "--out",
+        default=None,
+        help="Ruta del registro JSON (por defecto direct-access-smoke-<ts>.json)",
+    )
+    direct.set_defaults(func=_cmd_probe_direct_access)
+
     mapper = subparsers.add_parser(
         "map",
         help="Genera y aplica los mappings Biwenger↔Transfermarkt (IDs canónicos)",
@@ -297,6 +341,30 @@ def _cmd_probe_biwenger_quota(args: argparse.Namespace) -> int:
     # "already-open" y "timed-out" no midieron la ventana: se señalan con código 1
     # para que un run desatendido lo detecte sin parsear el registro.
     return 0 if report.outcome == "recovered" else 1
+
+
+def _cmd_probe_direct_access(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from lfdata.sources.smoke import SOURCES, default_out_path, run_smoke
+
+    out_path = Path(args.out) if args.out else default_out_path()
+    sources = tuple(args.sources) if args.sources else SOURCES
+    reports = run_smoke(
+        out_path,
+        sources=sources,
+        competition=args.competition,
+        season=args.season,
+        count=args.requests,
+        wait_seconds=args.wait_seconds,
+    )
+    for report in reports.values():
+        print(report.summary())
+    print(f"Registro en {out_path}")
+    # Un solo 403 (fuente vetada) da código 1 para que un run desatendido en Fargate
+    # detecte el problema sin parsear el registro; "rate-limited" no veta la IP y no
+    # bloquea la automatización, así que no cuenta como fallo.
+    return 1 if any(r.verdict == "blocked" for r in reports.values()) else 0
 
 
 def _cmd_map(args: argparse.Namespace) -> int:

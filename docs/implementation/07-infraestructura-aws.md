@@ -46,7 +46,7 @@ Sin orquestador externo (Airflow, Step Functions): es una secuencia lineal donde
 ## Orden de trabajo
 
 1. Terraform del núcleo: bucket de datos, IAM, ECR.
-2. Contenedor del pipeline + tarea manual en Fargate (backfills reales ya se lanzan así). Incluye una **tarea de humo** previa a automatizar: unas decenas de peticiones directas a Biwenger y SofaScore desde Fargate para validar que las IPs de datacenter de AWS no están vetadas (si lo están, el desbordamiento a proxy cubre el hueco con coste acotado). Cada tarea Fargate estrena IP pública, lo que además resetea la cuota por ventana de Biwenger en cada run.
+2. Contenedor del pipeline + tarea manual en Fargate (backfills reales ya se lanzan así). Incluye una **tarea de humo** previa a automatizar: unas decenas de peticiones directas a Biwenger y SofaScore desde Fargate para validar que las IPs de datacenter de AWS no están vetadas (si lo están, el desbordamiento a proxy cubre el hueco con coste acotado). Cada tarea Fargate estrena IP pública, lo que además resetea la cuota por ventana de Biwenger en cada run. La sonda es `lfdata probe direct-access` (issue #55): lanza `--requests` peticiones directas por fuente, registra el código de cada una en un JSON y concluye por fuente `viable` (200), `blocked` (403: IP vetada por Cloudflare/WAF) o `rate-limited` (429: cuota, no veto); devuelve código 1 solo si alguna fuente sale `blocked`. La conclusión del primer run real se documenta en #24 o en el ADR 0004.
 3. EventBridge diario + notificación de fallos.
 4. Lambda web + CloudFront + estáticos.
 5. Dominio y certificado si se quiere URL propia (decisión pendiente, no bloquea).
