@@ -129,6 +129,49 @@ def build_parser() -> argparse.ArgumentParser:
     )
     transfermarkt.set_defaults(func=_cmd_ingest_transfermarkt)
 
+    probe = subparsers.add_parser(
+        "probe",
+        help="Sondas de diagnóstico de las fuentes (no escriben datos curados)",
+    )
+    probe_targets = probe.add_subparsers(dest="target", title="sondas", required=True)
+
+    quota = probe_targets.add_parser(
+        "biwenger-quota",
+        help="Caracteriza la ventana de cuota de Biwenger (429→200) sondeando cada hora",
+    )
+    quota.add_argument(
+        "--competition",
+        default="la-liga",
+        choices=("la-liga", "segunda-division"),
+        help="Competición cuya plantilla se pide como sondeo (por defecto la-liga)",
+    )
+    quota.add_argument(
+        "--interval-hours",
+        type=float,
+        default=1.0,
+        help="Horas entre sondeos (por defecto 1)",
+    )
+    quota.add_argument(
+        "--max-hours",
+        type=float,
+        default=24.0,
+        help="Límite de horas antes de rendirse sin ver un 200 (por defecto 24)",
+    )
+    quota.add_argument(
+        "--measure-capacity",
+        action="store_true",
+        help=(
+            "Tras el primer 200, sigue pidiendo para contar cuántas peticiones admite la "
+            "ventana hasta el siguiente corte (opcional; quema la ventana recién repuesta)"
+        ),
+    )
+    quota.add_argument(
+        "--out",
+        default=None,
+        help="Ruta del registro JSON (por defecto biwenger-quota-probe-<competición>-<ts>.json)",
+    )
+    quota.set_defaults(func=_cmd_probe_biwenger_quota)
+
     mapper = subparsers.add_parser(
         "map",
         help="Genera y aplica los mappings Biwenger↔Transfermarkt (IDs canónicos)",
@@ -218,6 +261,26 @@ def _cmd_ingest_transfermarkt(args: argparse.Namespace) -> int:
         since_days=args.since_days,
     )
     return _report_ingest(result, args.competition, args.data)
+
+
+def _cmd_probe_biwenger_quota(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from lfdata.sources.biwenger import default_out_path, run_probe
+
+    out_path = Path(args.out) if args.out else default_out_path(args.competition)
+    report = run_probe(
+        args.competition,
+        out_path,
+        interval_seconds=args.interval_hours * 3600.0,
+        max_hours=args.max_hours,
+        measure_capacity=args.measure_capacity,
+    )
+    print(report.summary())
+    print(f"Registro en {out_path}")
+    # "already-open" y "timed-out" no midieron la ventana: se señalan con código 1
+    # para que un run desatendido lo detecte sin parsear el registro.
+    return 0 if report.outcome == "recovered" else 1
 
 
 def _cmd_map(args: argparse.Namespace) -> int:

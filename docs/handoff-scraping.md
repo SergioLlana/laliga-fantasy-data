@@ -175,6 +175,18 @@ Ordenado por impacto estimado:
    Un run directo en tandas de ~180 espaciadas (esperando a que la ventana se
    reponga) evitaría gastar créditos ScrapeOps por completo. Compensa medir la
    duración real de la ventana (¿por hora?, ¿por día?) — no está caracterizada.
+   **Herramienta:** `lfdata probe biwenger-quota` (issue #54) sondea esto: tras un
+   429 directo lanza una petición ligera por hora hasta un 200 y deja en un JSON
+   los timestamps 429→200 y la duración estimada de la ventana (cota inferior =
+   del primer al último 429 visto; superior = hasta el 200). Va siempre directo
+   (nunca proxy) y no escribe datos curados. `--measure-capacity` cuenta además
+   cuántas peticiones admite hasta el siguiente corte. Corre desatendida y termina
+   al primer 200 o al agotar `--max-hours`.
+
+   > **Conclusión de la primera ejecución real:** _(pendiente — rellenar aquí y en
+   > ADR 0004 tras correr la sonda). Duración medida de la ventana: __. ¿Cabe el
+   > post-jornada en tandas directas espaciadas (0 créditos) o necesita el
+   > desbordamiento a proxy?: __._
 4. **Reducir campos / payload.** El `fields=*,reports(...),prices,seasons` de
    Biwenger trae mucho; si la webapp/modelos no usan todo, pedir menos aligera la
    respuesta (y la latencia por proxy, que escala con el tamaño).
