@@ -12,7 +12,13 @@ from lfdata.sources.sofascore.client import (
     SourceFormatError,
 )
 from lfdata.sources.sofascore.crossvalidate import CrossCheckReport, crossvalidate_minutes
-from lfdata.sources.sofascore.ingest import backfill_league_season, ingest_player
+from lfdata.sources.sofascore.ingest import (
+    backfill_league_season,
+    backfill_league_season_for_year,
+    ingest_player,
+    resolve_season_id,
+    season_year_label,
+)
 
 __all__ = [
     "API_BASE",
@@ -22,6 +28,9 @@ __all__ = [
     "SofaScoreClient",
     "SourceFormatError",
     "backfill_league_season",
+    "backfill_league_season_for_year",
     "crossvalidate_minutes",
     "ingest_player",
+    "resolve_season_id",
+    "season_year_label",
 ]

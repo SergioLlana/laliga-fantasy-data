@@ -58,11 +58,21 @@ class BiwengerClient:
     def fetch_player_reports(
         self, competition: str, slug: str, season: str
     ) -> PlayerDetailResponse:
-        """Detalle por jugador y temporada: reports por partido y precios diarios."""
+        """Detalle por jugador y temporada: reports por partido y precios diarios.
+
+        ``season`` es el **año de inicio** de la temporada (2025 = 2025/26), la
+        misma convención que Transfermarkt y SofaScore. La API de Biwenger, en
+        cambio, identifica la temporada por su **año de fin** (2025/26 lo pide con
+        ``season=2026``; su propio ``data.seasons`` nombra al id 2026 como
+        "2025/2026 season"). Esa traducción vive aquí y solo afecta a la URL: la
+        partición y el nombre del raw se quedan con el año de inicio, para que
+        ``season=2025`` sea 2025/26 en todo el almacenamiento.
+        """
         if competition not in COMPETITIONS:
             raise ValueError(f"Competición desconocida: {competition!r} (usa {COMPETITIONS})")
+        api_season = str(int(season) + 1)
         url = f"{API_BASE}/players/{competition}/{slug}"
-        payload = self._transport.get(url, params={"fields": PLAYER_FIELDS, "season": season})
+        payload = self._transport.get(url, params={"fields": PLAYER_FIELDS, "season": api_season})
         self._raw_store.save(
             "biwenger", "player-reports", f"{competition}-{slug}-{season}", payload
         )

@@ -90,6 +90,16 @@ class SeasonsResponse(_SofaModel):
     )
 
 
+class TournamentSeasonsResponse(_SofaModel):
+    """Temporadas de un torneo (``unique-tournament/{ut}/seasons``).
+
+    Resuelve un año de inicio (2025 → "25/26") al id de temporada opaco que pide
+    el backfill.
+    """
+
+    seasons: list[SeasonRef] = Field(default_factory=list)
+
+
 # --- Agregado por temporada: .../statistics/overall -------------------------
 #
 # 115 campos agregados de la temporada (minutos, nota media, goles, xG...). El
