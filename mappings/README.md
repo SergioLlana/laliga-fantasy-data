@@ -22,6 +22,10 @@ evidencia del desempate.
 
 ## Flujo
 
+`transfermarkt_players` está particionada por temporada, así que `lfdata map`
+busca la contraparte en las plantillas de la temporada que se le pida
+(`--season`, año de inicio; la actual por defecto).
+
 1. `lfdata map` regenera candidatos: aprueba los seguros (`auto`) y deja los
    dudosos en los ficheros de revisión.
 2. Rellena a mano la columna `decision` de los dudosos:

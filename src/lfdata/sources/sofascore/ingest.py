@@ -396,9 +396,7 @@ def _event_stats(
         return None, PlayerFailure(f"event {event_id}", error.url, error.status)
 
 
-def _match_row(
-    rating: SeasonRating, stats: dict | None, player_id: int, common: dict
-) -> dict:
+def _match_row(rating: SeasonRating, stats: dict | None, player_id: int, common: dict) -> dict:
     """Fila de player_match_stats: contexto del partido + métricas de evento."""
     opponent = rating.opponent
     date = (

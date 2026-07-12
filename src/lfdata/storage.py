@@ -182,18 +182,40 @@ class RawStore:
         queda con la más nueva que contenga el fichero pedido. Sirve para saltar
         en un backfill lo que ya se descargó hace poco (``--since-days``).
         """
+        return self._last_download(source, dataset, name, extension)[0]
+
+    def read_latest(
+        self, source: str, dataset: str, name: str, *, extension: str = "json"
+    ) -> bytes | None:
+        """Payload de la descarga más reciente de ``name``, o ``None`` si no hay.
+
+        Permite volver a curar sin volver a pedir: raw/ es la fuente de verdad
+        inmutable, así que una tabla curada perdida o incompleta se reconstruye
+        desde aquí en vez de re-scrapear (ADR 0003).
+        """
+        download_date, key = self._last_download(source, dataset, name, extension)
+        if download_date is None or key is None:
+            return None
+        return self._backend.read_bytes(key)
+
+    def _last_download(
+        self, source: str, dataset: str, name: str, extension: str
+    ) -> tuple[date | None, str | None]:
+        """Fecha y clave de la descarga más reciente de ``name``."""
         prefix = f"raw/{source}/{dataset}/"
         suffix = f"/{name}.{extension}"
-        dates: list[date] = []
+        found: list[tuple[date, str]] = []
         for key in self._backend.list_keys(prefix):
             if not key.endswith(suffix):
                 continue
             partition = key[len(prefix) :].split("/", 1)[0]
             try:
-                dates.append(date.fromisoformat(partition.removeprefix("fecha_descarga=")))
+                found.append((date.fromisoformat(partition.removeprefix("fecha_descarga=")), key))
             except ValueError:
                 continue
-        return max(dates) if dates else None
+        if not found:
+            return None, None
+        return max(found, key=lambda item: item[0])
 
 
 class CuratedStore:
@@ -287,6 +309,23 @@ class CuratedStore:
             return set()
         existing = pd.read_parquet(io.BytesIO(self._backend.read_bytes(table_key)))
         return set(existing[column].dropna())
+
+    def read_partition(
+        self,
+        table: str,
+        *,
+        partition: Mapping[str, str] | None = None,
+    ) -> pd.DataFrame:
+        """Lee una única partición, o un DataFrame vacío si no existe.
+
+        A diferencia de :meth:`read_table` no recorre la tabla entera ni añade
+        las columnas de partición: devuelve el fichero tal cual. Sirve para
+        consultar el estado previo de una partición antes de reescribirla.
+        """
+        table_key = self._table_key(table, partition)
+        if not self._backend.exists(table_key):
+            return pd.DataFrame()
+        return pd.read_parquet(io.BytesIO(self._backend.read_bytes(table_key)))
 
     @staticmethod
     def _table_key(table: str, partition: Mapping[str, str] | None) -> str:

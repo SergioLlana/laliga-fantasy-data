@@ -352,24 +352,54 @@ def test_ingest_is_idempotent(storage: Storage) -> None:
     assert len(values) == first.rows["market_values_tm"]
 
 
-def test_ingest_since_days_skips_recently_scraped(storage: Storage) -> None:
+def test_since_days_recures_from_raw_without_refetching(storage: Storage) -> None:
     ingest_squads(
         storage, "la-liga", season=2025, transport=RoutingTransport(default_routes()), max_clubs=1
     )
     before = storage.curated.read_table("transfermarkt_players")
 
-    # Todos se descargaron hoy: con una ventana amplia, se saltan todos.
+    # Todos se descargaron hoy: con una ventana amplia, no se vuelve a pedir a la
+    # fuente a ninguno... pero se les cura igual, parseando el raw ya guardado.
+    transport = RoutingTransport(default_routes())
     result = ingest_squads(
         storage,
         "la-liga",
         season=2025,
-        transport=RoutingTransport(default_routes()),
+        transport=transport,
         max_clubs=1,
         since_days=30,
     )
-    assert result.rows == dict.fromkeys(result.rows, 0)
+    assert result.rows["transfermarkt_players"] == len(before)
+    assert not [url for url in transport.urls if "spieler" in url or "ceapi" in url]
     after = storage.curated.read_table("transfermarkt_players")
-    assert len(after) == len(before)  # la partición queda intacta
+    assert len(after) == len(before)
+
+
+def test_since_days_refills_a_player_missing_from_curated(storage: Storage) -> None:
+    """El jugador ya bajado pero ausente de la tabla vuelve a entrar (regresión).
+
+    Antes, ``--since-days`` saltaba al jugador *antes* de curarlo: quien hubiera
+    desaparecido de la partición (p. ej. podado por el refresh de otra temporada)
+    no volvía a entrar nunca, porque su raw reciente hacía que se le saltara.
+    """
+    ingest_squads(
+        storage, "la-liga", season=2025, transport=RoutingTransport(default_routes()), max_clubs=1
+    )
+    partition = {"competition": "la-liga", "season": "2025"}
+    full = storage.curated.read_partition("transfermarkt_players", partition=partition)
+    storage.curated.write_table("transfermarkt_players", full.iloc[2:], partition=partition)
+    missing = set(full.iloc[:2]["id"])
+    assert not missing & set(
+        storage.curated.read_partition("transfermarkt_players", partition=partition)["id"]
+    )
+
+    transport = RoutingTransport(default_routes())
+    ingest_squads(storage, "la-liga", season=2025, transport=transport, max_clubs=1, since_days=30)
+
+    players = storage.curated.read_partition("transfermarkt_players", partition=partition)
+    assert missing <= set(players["id"])  # los dos que faltaban están de vuelta
+    assert len(players) == len(full)
+    assert not [url for url in transport.urls if "spieler" in url]  # sin re-scrapear
 
 
 # --- resiliencia: 404 por jugador y refresh que retira a quien salió (#36) ---
@@ -406,7 +436,7 @@ def test_full_refresh_retires_departed_player(storage: Storage) -> None:
     ingest_squads(
         storage, "la-liga", season=2025, transport=RoutingTransport(default_routes()), max_clubs=1
     )
-    partition = {"competition": "la-liga"}
+    partition = {"competition": "la-liga", "season": "2025"}
     seeded = storage.curated.read_table("transfermarkt_players")
     phantom = seeded.iloc[[0]].copy()
     phantom["id"] = 999999
@@ -421,11 +451,36 @@ def test_full_refresh_retires_departed_player(storage: Storage) -> None:
     assert len(players) == 39  # solo los vistos en plantilla
 
 
+def test_full_refresh_of_a_season_leaves_other_seasons_intact(storage: Storage) -> None:
+    """Ingerir una temporada no poda a los jugadores de otra (regresión).
+
+    ``transfermarkt_players`` estuvo particionada solo por competición, así que
+    el refresh completo de 2023 retiraba a todo el que no jugara en 2023 —
+    incluidos los de la temporada en curso—, y ``--since-days`` impedía después
+    que volvieran. Cada temporada es ahora su propia partición.
+    """
+    ingest_squads(storage, "la-liga", season=2025, transport=RoutingTransport(default_routes()))
+    before = storage.curated.read_partition(
+        "transfermarkt_players", partition={"competition": "la-liga", "season": "2025"}
+    )
+    assert len(before) == 39
+
+    # Refresh completo de otra temporada, con las mismas plantillas-fixture.
+    ingest_squads(storage, "la-liga", season=2023, transport=RoutingTransport(default_routes()))
+
+    after = storage.curated.read_partition(
+        "transfermarkt_players", partition={"competition": "la-liga", "season": "2025"}
+    )
+    assert set(after["id"]) == set(before["id"])  # 2025 sigue entera
+    seasons = storage.curated.read_table("transfermarkt_players")["season"]
+    assert set(seasons.astype(str)) == {"2025", "2023"}
+
+
 def test_partial_run_never_retires(storage: Storage) -> None:
     ingest_squads(
         storage, "la-liga", season=2025, transport=RoutingTransport(default_routes()), max_clubs=1
     )
-    partition = {"competition": "la-liga"}
+    partition = {"competition": "la-liga", "season": "2025"}
     seeded = storage.curated.read_table("transfermarkt_players")
     phantom = seeded.iloc[[0]].copy()
     phantom["id"] = 999999

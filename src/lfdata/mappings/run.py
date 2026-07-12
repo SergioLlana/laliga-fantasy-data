@@ -39,6 +39,7 @@ from lfdata.mappings.store import (
     TRANSFERMARKT,
     MappingStore,
 )
+from lfdata.sources.transfermarkt import DEFAULT_SEASON
 from lfdata.storage import Storage
 
 _YES = frozenset({"y", "yes", "si", "sí", "x", "1", "true", "ok"})
@@ -261,8 +262,19 @@ def _read_curated(storage: Storage, table: str, columns: list[str]) -> pd.DataFr
     return df[columns]
 
 
-def run_map(storage: Storage, mappings_dir, *, today: str | None = None) -> MapReport:
-    """Regenera candidatos y aplica decisiones; devuelve el resumen."""
+def run_map(
+    storage: Storage,
+    mappings_dir,
+    *,
+    season: int = DEFAULT_SEASON,
+    today: str | None = None,
+) -> MapReport:
+    """Regenera candidatos y aplica decisiones; devuelve el resumen.
+
+    ``transfermarkt_players`` está particionada por temporada (un jugador
+    pertenece a una plantilla *de una temporada*), así que buscamos la
+    contraparte de Biwenger en la temporada pedida: la actual por defecto.
+    """
     today = today or _today()
     biw_players = _read_curated(
         storage, "biwenger_players", ["id", "name", "team_id", "birth_date", "competition"]
@@ -271,8 +283,9 @@ def run_map(storage: Storage, mappings_dir, *, today: str | None = None) -> MapR
     tm_players = _read_curated(
         storage,
         "transfermarkt_players",
-        ["id", "name", "club_id", "club_name", "birth_date", "position", "competition"],
+        ["id", "name", "club_id", "club_name", "birth_date", "position", "competition", "season"],
     )
+    tm_players = tm_players[tm_players["season"].astype(str) == str(season)]
 
     store = MappingStore(mappings_dir)
     store.load()

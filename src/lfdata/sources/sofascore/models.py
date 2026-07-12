@@ -55,9 +55,7 @@ class SearchResponse(_SofaModel):
 
     def players(self) -> list[SearchPlayer]:
         """Solo las entidades de tipo ``player``, ya validadas."""
-        return [
-            SearchPlayer.model_validate(r.entity) for r in self.results if r.type == "player"
-        ]
+        return [SearchPlayer.model_validate(r.entity) for r in self.results if r.type == "player"]
 
 
 # --- Temporadas del jugador: player/{id}/statistics/seasons -----------------
@@ -171,9 +169,7 @@ class CalendarEvent(_SofaModel):
     status: EventStatus = Field(default_factory=EventStatus)
     home_team: EventTeam = Field(alias="homeTeam")
     away_team: EventTeam = Field(alias="awayTeam")
-    has_event_player_statistics: bool | None = Field(
-        alias="hasEventPlayerStatistics", default=None
-    )
+    has_event_player_statistics: bool | None = Field(alias="hasEventPlayerStatistics", default=None)
 
     @property
     def finished(self) -> bool:

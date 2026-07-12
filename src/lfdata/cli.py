@@ -339,6 +339,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="No escribe: falla si hay datos de Biwenger sin mapping (CI y pipeline)",
     )
     mapper.add_argument(
+        "--season",
+        type=int,
+        default=DEFAULT_SEASON,
+        help=(
+            "Temporada de las plantillas de Transfermarkt en las que buscar la contraparte "
+            f"(año de inicio; por defecto {DEFAULT_SEASON})"
+        ),
+    )
+    mapper.add_argument(
         "--data",
         default=os.environ.get("LFDATA_DATA", DEFAULT_DATA_URI),
         help=f"URI base del almacenamiento (por defecto {DEFAULT_DATA_URI} o $LFDATA_DATA)",
@@ -527,7 +536,7 @@ def _cmd_map(args: argparse.Namespace) -> int:
             print("Todos los jugadores y equipos de Biwenger tienen mapping.")
             return 0
 
-        report = run_map(storage, args.mappings)
+        report = run_map(storage, args.mappings, season=args.season)
         print(report.render())
         print(f"Mappings escritos en {args.mappings}/")
         return 0

@@ -69,6 +69,17 @@ def test_curated_store_partitioned_write_is_readable(storage: Storage, tmp_path:
     assert pd.read_parquet(tmp_path / key)["id"].tolist() == [1]
 
 
+def test_read_partition_returns_single_partition_or_empty(storage: Storage) -> None:
+    storage.curated.write_table(
+        "players", pd.DataFrame({"id": [1]}), partition={"competition": "la-liga"}
+    )
+    read = storage.curated.read_partition("players", partition={"competition": "la-liga"})
+    assert read["id"].tolist() == [1]
+    assert "competition" not in read.columns  # el fichero tal cual, sin columnas de partición
+    missing = storage.curated.read_partition("players", partition={"competition": "premier"})
+    assert missing.empty
+
+
 def test_numeric_looking_season_partition_reads_back_as_str(storage: Storage) -> None:
     # `season` se escribe como str ("2026"); al reconstruir la partición desde la
     # clave se relee como str, sin que pyarrow la infiera como int.

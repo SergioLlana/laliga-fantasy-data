@@ -16,6 +16,7 @@ from lfdata.cli import main
 from lfdata.mappings import check_mappings, run_map
 from lfdata.mappings.normalize import name_compatible, normalize, team_compatible
 from lfdata.mappings.store import MappingIntegrityError, MappingStore
+from lfdata.sources.transfermarkt import DEFAULT_SEASON
 from lfdata.storage import Storage
 
 
@@ -28,6 +29,7 @@ def seed(
     storage: Storage,
     *,
     competition: str = "la-liga",
+    season: int = DEFAULT_SEASON,
     teams: list[dict],
     players: list[dict],
     tm_players: list[dict],
@@ -40,7 +42,12 @@ def seed(
     storage.curated.write_table("biwenger_players", players_df, partition=partition)
     tm = pd.DataFrame(tm_players).astype({"club_id": "Int64"})
     tm["birth_date"] = pd.to_datetime(tm["birth_date"])
-    storage.curated.write_table("transfermarkt_players", tm, partition=partition)
+    # transfermarkt_players es la plantilla *de una temporada* (ver ingest).
+    storage.curated.write_table(
+        "transfermarkt_players",
+        tm,
+        partition={"competition": competition, "season": str(season)},
+    )
 
 
 # --- normalización -----------------------------------------------------------

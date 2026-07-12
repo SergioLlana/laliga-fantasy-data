@@ -42,6 +42,14 @@ El modelo que predice cuántos minutos jugará un jugador en una jornada (titula
 El modelo que predice los puntos por partido de un jugador condicionado a que juegue.
 _Avoid_: modelo de puntos (ambiguo con la proyección final)
 
+**Nivel de equipo**:
+La fuerza de un equipo como variable de los modelos, medida por el valor de plantilla de Transfermarkt. Se aplica al equipo propio y al rival.
+_Avoid_: calidad del rival (era la medida anterior, basada en puntos concedidos)
+
+**Nivel de liga**:
+La fuerza de una liga de origen para el baseline de fichajes: coeficiente estimado con traslados históricos hacia La Liga, complementado con el valor de plantilla promedio de los equipos de esa liga.
+_Avoid_: tier (reservado para la agrupación de ligas en la exploración jerárquica)
+
 **Versión de modelo**:
 Un entrenamiento concreto con sus features, preprocesado y datos fijados; está **activa** (alimenta la web), es **candidata** (en evaluación) o está **archivada**.
 
