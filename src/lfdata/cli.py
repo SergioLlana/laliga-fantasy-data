@@ -8,6 +8,7 @@ import logging
 import os
 
 from lfdata import __version__
+from lfdata.newcomers import SINCE_DAYS as NEWCOMER_SINCE_DAYS
 from lfdata.sources.transfermarkt import DEFAULT_SEASON
 
 DEFAULT_DATA_URI = "file://./data"
@@ -329,6 +330,61 @@ def build_parser() -> argparse.ArgumentParser:
     )
     direct.set_defaults(func=_cmd_probe_direct_access)
 
+    newcomers = subparsers.add_parser(
+        "newcomers",
+        help=(
+            "Detecta los fichajes de la plantilla (sin puntos en temporadas anteriores) "
+            "y dispara su descarga bajo demanda de Transfermarkt y SofaScore"
+        ),
+    )
+    newcomers.add_argument(
+        "--competition",
+        default="la-liga",
+        choices=("la-liga", "segunda-division"),
+        help="Competición cuya plantilla se inspecciona (por defecto la-liga)",
+    )
+    newcomers.add_argument(
+        "--season",
+        type=int,
+        required=True,
+        help="Año de inicio de la temporada en curso (2025 = 2025/26)",
+    )
+    newcomers.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Solo detecta y los lista en el log; no descarga nada ni escribe tablas",
+    )
+    newcomers.add_argument(
+        "--max-newcomers",
+        type=int,
+        default=None,
+        help=(
+            "Resuelve como mucho N fichajes en este run y aplaza el resto al siguiente. "
+            "Con el histórico de puntos incompleto (backfill a medias) media plantilla parece "
+            "recién llegada: el tope evita lanzarle cientos de peticiones a las fuentes"
+        ),
+    )
+    newcomers.add_argument(
+        "--since-days",
+        type=int,
+        default=NEWCOMER_SINCE_DAYS,
+        help=(
+            "Al refrescar la plantilla de Transfermarkt del club de llegada, no re-pide a los "
+            f"jugadores bajados hace menos de N días (por defecto {NEWCOMER_SINCE_DAYS})"
+        ),
+    )
+    newcomers.add_argument(
+        "--data",
+        default=os.environ.get("LFDATA_DATA", DEFAULT_DATA_URI),
+        help=f"URI base del almacenamiento (por defecto {DEFAULT_DATA_URI} o $LFDATA_DATA)",
+    )
+    newcomers.add_argument(
+        "--mappings",
+        default=DEFAULT_MAPPINGS_DIR,
+        help=f"Directorio de los ficheros de mappings (por defecto {DEFAULT_MAPPINGS_DIR}/)",
+    )
+    newcomers.set_defaults(func=_cmd_newcomers)
+
     mapper = subparsers.add_parser(
         "map",
         help="Genera y aplica los mappings Biwenger↔Transfermarkt (IDs canónicos)",
@@ -515,6 +571,23 @@ def _cmd_probe_direct_access(args: argparse.Namespace) -> int:
     # detecte el problema sin parsear el registro; "rate-limited" no veta la IP y no
     # bloquea la automatización, así que no cuenta como fallo.
     return 1 if any(r.verdict == "blocked" for r in reports.values()) else 0
+
+
+def _cmd_newcomers(args: argparse.Namespace) -> int:
+    from lfdata.newcomers import ingest_newcomers
+    from lfdata.storage import Storage
+
+    storage = Storage(args.data)
+    result = ingest_newcomers(
+        storage,
+        args.competition,
+        args.season,
+        mappings_dir=args.mappings,
+        since_days=args.since_days,
+        max_newcomers=args.max_newcomers,
+        dry_run=args.dry_run,
+    )
+    return _report_ingest(result, f"{args.competition} {args.season}", args.data)
 
 
 def _cmd_map(args: argparse.Namespace) -> int:

@@ -44,11 +44,18 @@ uv run lfdata ingest sofascore --player 1086128
 # --max-matches acota una prueba (--season es el año de inicio: 2025 = 2025/26)
 uv run lfdata backfill sofascore --competition la-liga --season 2025 --max-matches 5
 
+# Detector de fichajes: quien está en la plantilla sin puntos en temporadas
+# anteriores. Refresca la plantilla de Transfermarkt de su club de llegada, lo
+# mapea (o lo encola a revisión) y descarga su historial de SofaScore
+uv run lfdata newcomers --competition la-liga --season 2026
+uv run lfdata newcomers --season 2026 --dry-run          # solo los lista, sin descargar
+uv run lfdata newcomers --season 2026 --max-newcomers 5  # tope de fichajes por run
+
 # Informe de cruce de minutos SofaScore ↔ Biwenger (tolerancia 10 pp, umbral 95)
 uv run lfdata crosscheck sofascore-biwenger-minutes --out crosscheck.json
 ```
 
-Los datos se escriben en dos capas bajo la URI de `--data` (por defecto `file://./data`, configurable con `$LFDATA_DATA`): la respuesta cruda tal cual en `raw/` y tablas Parquet en `curated/`, legibles con pandas o DuckDB. Biwenger produce `biwenger_players` y `biwenger_teams`; Transfermarkt produce `transfermarkt_players` (particionada por competición **y temporada**: la pertenencia a una plantilla es de una temporada concreta, así que ingerir 2023 no toca a los jugadores de 2026), `market_values_tm`, `transfers`, `availability_tm` (disponibilidad por partido) e `injuries_tm` (historial de lesiones) —estas cuatro son el histórico del jugador, el mismo desde cualquier temporada, y van solo por competición—, aún con IDs de Transfermarkt, a la espera del paso de mapping a IDs canónicos. SofaScore produce `player_season_stats` (agregado de 115 campos por jugador-temporada) y `player_match_stats` (nota y métricas de evento por jugador-partido: minutos, pases, remates, goles, asistencias, xG…); cada fila lleva su `canonical_id` si el id de SofaScore ya está mapeado y, si no, el jugador queda encolado en `mappings/sofascore-review.csv`.
+Los datos se escriben en dos capas bajo la URI de `--data` (por defecto `file://./data`, configurable con `$LFDATA_DATA`): la respuesta cruda tal cual en `raw/` y tablas Parquet en `curated/`, legibles con pandas o DuckDB. Biwenger produce `biwenger_players` y `biwenger_teams`; Transfermarkt produce `transfermarkt_players` (particionada por competición **y temporada**: la pertenencia a una plantilla es de una temporada concreta, así que ingerir 2023 no toca a los jugadores de 2026), `market_values_tm`, `transfers`, `availability_tm` (disponibilidad por partido) e `injuries_tm` (historial de lesiones) —estas cuatro son el histórico del jugador, el mismo desde cualquier temporada, y van solo por competición—, aún con IDs de Transfermarkt, a la espera del paso de mapping a IDs canónicos. SofaScore produce `player_season_stats` (agregado de 115 campos por jugador-temporada) y `player_match_stats` (nota y métricas de evento por jugador-partido: minutos, pases, remates, goles, asistencias, xG…); cada fila lleva su `canonical_id` si el id de SofaScore ya está mapeado y, si no, el jugador queda encolado en `mappings/sofascore-review.csv`. El detector de fichajes produce `newcomers` (grano jugador-temporada de debut: quién llegó, a qué equipo y si su historial está descargado), que es además su marca de idempotencia: un fichaje ya resuelto no vuelve a generar peticiones.
 
 ## Desarrollo
 

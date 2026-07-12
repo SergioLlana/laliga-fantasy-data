@@ -12,7 +12,12 @@ import pytest
 
 from lfdata.cli import main
 from lfdata.sources.http import SourceHTTPError
-from lfdata.sources.transfermarkt import SourceFormatError, TransfermarktClient, ingest_squads
+from lfdata.sources.transfermarkt import (
+    SourceFormatError,
+    TransfermarktClient,
+    ingest_clubs,
+    ingest_squads,
+)
 from lfdata.sources.transfermarkt.parse import (
     availability_rows,
     classify_transfer,
@@ -491,6 +496,43 @@ def test_partial_run_never_retires(storage: Storage) -> None:
         storage, "la-liga", season=2025, transport=RoutingTransport(default_routes()), max_clubs=1
     )
     assert 999999 in set(storage.curated.read_table("transfermarkt_players")["id"])
+
+
+def test_ingest_clubs_refreshes_only_the_clubs_asked_for(storage: Storage) -> None:
+    # El refresh dirigido del detector de fichajes: una plantilla, no las veinte.
+    transport = RoutingTransport(default_routes())
+
+    result = ingest_clubs(storage, "la-liga", [2497], season=2025, transport=transport)
+
+    kaders = [url for url in transport.urls if "kader/verein" in url]
+    assert len(kaders) == 1
+    assert "verein/2497" in kaders[0]
+    assert result.rows["transfermarkt_players"] == 39
+
+
+def test_ingest_clubs_never_retires(storage: Storage) -> None:
+    ingest_squads(storage, "la-liga", season=2025, transport=RoutingTransport(default_routes()))
+    partition = {"competition": "la-liga", "season": "2025"}
+    seeded = storage.curated.read_table("transfermarkt_players")
+    phantom = seeded.iloc[[0]].copy()
+    phantom["id"] = 999999
+    storage.curated.upsert_table("transfermarkt_players", phantom, key="id", partition=partition)
+
+    # Solo se ha visto un club: retirar al resto sería borrar a quien ni se miró.
+    ingest_clubs(
+        storage, "la-liga", [2497], season=2025, transport=RoutingTransport(default_routes())
+    )
+
+    assert 999999 in set(storage.curated.read_table("transfermarkt_players")["id"])
+
+
+def test_ingest_clubs_warns_about_a_club_outside_the_competition(storage: Storage, caplog) -> None:
+    result = ingest_clubs(
+        storage, "la-liga", [123456], season=2025, transport=RoutingTransport(default_routes())
+    )
+
+    assert result.rows["transfermarkt_players"] == 0
+    assert "123456" in caplog.text
 
 
 class Fail502OnSquadTransport(RoutingTransport):
