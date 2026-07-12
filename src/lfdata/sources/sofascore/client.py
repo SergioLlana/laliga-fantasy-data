@@ -81,9 +81,7 @@ class SofaScoreClient:
         payload = self._get(url, "player-overall", f"{player_id}-{tournament_id}-{season_id}")
         return self._validate(OverallStatisticsResponse, payload, url)
 
-    def fetch_ratings(
-        self, player_id: int, tournament_id: int, season_id: int
-    ) -> RatingsResponse:
+    def fetch_ratings(self, player_id: int, tournament_id: int, season_id: int) -> RatingsResponse:
         """Nota por partido del jugador en una liga-temporada."""
         url = (
             f"{API_BASE}/player/{player_id}/unique-tournament/{tournament_id}"
@@ -106,17 +104,10 @@ class SofaScoreClient:
         payload = self._get(url, "tournament-seasons", str(tournament_id))
         return self._validate(TournamentSeasonsResponse, payload, url)
 
-    def fetch_events(
-        self, tournament_id: int, season_id: int, page: int = 0
-    ) -> EventsResponse:
+    def fetch_events(self, tournament_id: int, season_id: int, page: int = 0) -> EventsResponse:
         """Una página del calendario de partidos pasados de una liga-temporada."""
-        url = (
-            f"{API_BASE}/unique-tournament/{tournament_id}/season/{season_id}"
-            f"/events/last/{page}"
-        )
-        payload = self._get(
-            url, "tournament-events", f"{tournament_id}-{season_id}-last-{page}"
-        )
+        url = f"{API_BASE}/unique-tournament/{tournament_id}/season/{season_id}/events/last/{page}"
+        payload = self._get(url, "tournament-events", f"{tournament_id}-{season_id}-last-{page}")
         return self._validate(EventsResponse, payload, url)
 
     def fetch_lineups(self, event_id: int) -> LineupsResponse:

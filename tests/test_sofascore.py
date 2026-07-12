@@ -302,9 +302,7 @@ def _seed_crosscheck(tmp_path, sofascore_minutes, biwenger_minutes):
     storage.curated.write_table(
         "player_match_stats", so, partition={"competition": "8", "season": "77559"}
     )
-    bi = pd.DataFrame(
-        [{"player_id": 111, "date": d, "minutes": m} for d, m in biwenger_minutes]
-    )
+    bi = pd.DataFrame([{"player_id": 111, "date": d, "minutes": m} for d, m in biwenger_minutes])
     storage.curated.write_table(
         "fantasy_points", bi, partition={"competition": "la-liga", "season": "2025"}
     )
