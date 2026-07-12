@@ -11,19 +11,47 @@
 
 "Los puntos de la próxima jornada = media de los últimos 5 partidos jugados" (y minutos igual). Sin esto no hay forma de saber si los modelos aportan.
 
+## Análisis previo — eventos → puntos por posición (decidido 2026-07-12)
+
+Antes de fijar las features del modelo de rendimiento, un análisis descriptivo sobre el histórico: regresión `puntos ~ estadísticas de eventos` por **posición** y **sistema de puntuación** (los cinco, mismo método). Objetivos:
+
+- Para el sistema Estadísticas (regla casi determinista sobre eventos) debe salir un ajuste casi perfecto — si no, no entendemos el dato.
+- Para los sistemas de nota (SofaScore, Picas/AS, Media) revela qué eventos mueven la nota en cada posición (¿pesan los despejes de un lateral? ¿las paradas?).
+- El resultado es la **shortlist de features de forma** del modelo de rendimiento, con evidencia documentada, y alimenta el principio de "confianza mostrando el porqué" de PRODUCT.md.
+
+Se documenta como experimento en `docs/experiments/`. No cambia la arquitectura: el modelo de rendimiento sigue prediciendo puntos directamente (se descartó el modelo en dos etapas eventos→puntos por multiplicar los modelos a mantener).
+
 ## Iteración 1 — GLM jerárquico (statsmodels)
 
 ### Modelo de minutos
 
 - Variable respuesta: minutos del jugador en el partido (0-90+), dominada por la decisión de titularidad.
-- Estructura en dos partes: probabilidad de jugar ≥1 minuto (logística) × minutos esperados si juega (lineal). Efectos aleatorios por jugador (hábito de titularidad) y fijos por posición, racha de titularidades recientes, estado (lesión/sanción según Biwenger `status`), densidad de calendario.
+- Estructura en dos partes: probabilidad de jugar ≥1 minuto (logística) × minutos esperados si juega (lineal). **Vía de mejora decidida con datos** (2026-07-12): si el error de minutos lo justifica, pasar a tres estados (titular / entra desde el banquillo / no juega) × minutos condicionados al estado — el dato de titularidad ya está ingerido (SofaScore `substitute`, Transfermarkt minuto de entrada/salida).
+- Features:
+  - Efecto aleatorio por jugador (hábito de titularidad); posición (fijo).
+  - Racha de titularidades recientes (no solo "jugó": distinguir titular de suplente).
+  - Estado actual (lesión/sanción según Biwenger `status`).
+  - Lesiones desde el historial de Transfermarkt: **partidos desde la vuelta de lesión** (dosificación post-lesión que el `status` ya no refleja) y **días lesionado en los últimos 12 meses** (fragilidad).
+  - Edad, como spline (no lineal).
+  - Densidad de calendario **incluyendo Copa y competiciones UEFA**: días desde el último partido de cualquier competición, partido entre semana próximo, y minutos jugados en esos partidos (requiere ingerir fixtures + alineaciones de esas competiciones para equipos de La Liga; los rivales extranjeros no necesitan mapping de jugadores).
 - statsmodels: `BinomialBayesMixedGLM` para la parte logística y `MixedLM` para la parte continua.
 
 ### Modelo de rendimiento
 
 - Variable respuesta: puntos del sistema de puntuación por partido, condicionado a haber jugado. Un ajuste por sistema (5 ajustes con las mismas features).
-- Efectos: jugador (aleatorio), posición, calidad del rival (media de puntos concedidos por el rival a esa posición), local/visitante, forma reciente (media móvil de nota SofaScore y de métricas de `player_match_stats`), minutos esperados como offset.
+- Features:
+  - Efecto aleatorio por jugador; posición (fijo); local/visitante.
+  - **Nivel de equipo, propio y rival: valor de plantilla de Transfermarkt** (decidido 2026-07-12). Se descartó de momento la "media de puntos fantasy concedidos por el rival a cada posición"; queda anotada como mejora futura (captura matchups específicos que el valor de plantilla no ve).
+  - Forma reciente: media móvil de nota SofaScore y de las métricas de `player_match_stats` que el análisis eventos→puntos señale como relevantes por posición.
+  - Edad, como spline (no lineal).
+  - Minutos esperados como offset.
+- **Excluido a propósito** (2026-07-12): el precio de Biwenger (nivel y variación). Captura sabiduría de la multitud (noticias, alineaciones probables) pero acoplaría los modelos con la recomendación de infravalorados (proyección vs. precio sería circular). Queda como vía de exploración futura; si se incorpora, hay que excluirlo de esa comparativa.
 - statsmodels: `MixedLM` sobre puntos por partido (los puntos fantasy son suficientemente continuos; los sistemas basados en nota son casi gaussianos).
+
+### Datos nuevos que requieren ingesta
+
+1. **Fixtures + alineaciones de Copa del Rey y competiciones UEFA** (equipos de La Liga) vía SofaScore, para la densidad de calendario y los minutos entre semana.
+2. **Página de competición de Transfermarkt** (valor de plantilla por club) para las ligas cubiertas: una petición por liga-temporada, refresco al cierre de cada ventana de mercado. Da el nivel de equipo (propio/rival/extranjero) y, promediando clubes, el nivel de liga para el paso 5 — sin necesitar mappings de jugadores extranjeros.
 
 ### Validación
 
@@ -67,11 +95,12 @@ El comando `lfdata train` escribe la versión nueva completa; `lfdata models lis
 
 ## Orden de trabajo
 
-1. `lfdata.features`: construcción de la tabla de entrenamiento desde `fantasy_points` + `player_match_stats` + calendario (tests con casos fijados).
-2. Referencia (iteración 0) + arnés de validación temporal. **El arnés va antes que cualquier modelo.**
-3. Modelo de minutos, evaluar; modelo de rendimiento, evaluar.
-4. Composición y escritura de `projections`; comando `lfdata project --round J`.
-5. (Después, sin prisa) Iteración 2 en Stan.
+1. Análisis eventos→puntos por posición y sistema (experimento documentado) → shortlist de features de forma.
+2. `lfdata.features`: construcción de la tabla de entrenamiento desde `fantasy_points` + `player_match_stats` + calendario (tests con casos fijados).
+3. Referencia (iteración 0) + arnés de validación temporal. **El arnés va antes que cualquier modelo.**
+4. Modelo de minutos, evaluar; modelo de rendimiento, evaluar.
+5. Composición y escritura de `projections`; comando `lfdata project --round J`.
+6. (Después, sin prisa) Iteración 2 en Stan.
 
 ## Hecho cuando
 

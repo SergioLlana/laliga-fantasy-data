@@ -64,13 +64,13 @@ Cada fuente usa sus propios nombres e IDs. Mantenemos un ID propio por jugador y
 Dos modelos separados por sistema de puntuación (ver CONTEXT.md):
 
 - **Modelo de minutos**: cuántos minutos jugará un jugador en la jornada (titularidad, rotación, lesiones, sanciones).
-- **Modelo de rendimiento**: puntos por partido si juega, con variables de forma reciente, rival, local/visitante, posición y métricas de partido.
+- **Modelo de rendimiento**: puntos por partido si juega, con variables de forma reciente, nivel de equipo propio y rival (valor de plantilla Transfermarkt), local/visitante, posición, edad y métricas de partido. Las features de forma se eligen con un análisis previo de cómo los eventos por jugador se traducen en puntos, por posición y sistema de puntuación.
 
 La proyección por jornada es el producto de ambos. Para fichajes sin historial en La Liga, el modelo de rendimiento se alimenta de sus estadísticas en la liga anterior y su valor en Transfermarkt, con un ajuste por el nivel de la liga de origen.
 
 Enfoque en dos iteraciones: primero GLM jerárquico con statsmodels, después el mismo diseño en Stan (cmdstanpy) para incertidumbre completa. Validación: entrenar con temporadas pasadas y evaluar sobre la temporada siguiente (nunca mezclar futuro en el entrenamiento). Referencia mínima a batir: "los puntos de la próxima jornada son la media de las últimas cinco".
 
-Cobertura de eventing: La Liga y Segunda (Biwenger + SofaScore), las 5 grandes ligas europeas completas, y el resto de ligas bajo demanda por jugador cuando aparece un fichaje. **Segunda es solo histórico** (decidido el 2026-07-10): alimenta los baselines de ascendidos, así que se backfillea y se re-ingiere completa una vez al cierre de cada temporada; durante la temporada no se refresca (bajo demanda si un jugador sube en el mercado de invierno).
+Cobertura de eventing: La Liga y Segunda (Biwenger + SofaScore), las 5 grandes ligas europeas completas, y el resto de ligas bajo demanda por jugador cuando aparece un fichaje. **Segunda es solo histórico** (decidido el 2026-07-10): alimenta los baselines de ascendidos, así que se backfillea y se re-ingiere completa una vez al cierre de cada temporada; durante la temporada no se refresca (bajo demanda si un jugador sube en el mercado de invierno). Además de las ligas, se ingieren los fixtures y alineaciones de Copa del Rey y competiciones UEFA para los equipos de La Liga (densidad de calendario del modelo de minutos) y las páginas de competición de Transfermarkt (valor de plantilla por club, base del nivel de equipo y de liga).
 
 ## Aplicación web
 

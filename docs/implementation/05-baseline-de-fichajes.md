@@ -8,8 +8,9 @@ Un fichaje trae señal de tres sitios: sus estadísticas por partido en la liga 
 
 ## Ajuste por nivel de liga
 
-- Se estima con los **traslados históricos**: jugadores de las 5 temporadas de backfill que cambiaron de liga, comparando su rendimiento por 90 minutos antes y después del salto (mismos pares de ligas: Portugal→La Liga, Championship→La Liga...).
-- Para pares de ligas con pocos traslados, el coeficiente se encoge hacia el de un grupo de ligas de nivel similar (aquí el partial pooling de la iteración 2 en Stan encaja de forma natural; la iteración 1 usa medias ponderadas por número de traslados).
+- Se estima con los **traslados históricos**: jugadores de las 5 temporadas de backfill que cambiaron de liga, comparando su rendimiento por 90 minutos antes y después del salto. El destino es siempre La Liga, así que los coeficientes son por liga de origen (Portugal→La Liga, Championship→La Liga...).
+- Complemento decidido el 2026-07-12: una covariable continua de **nivel de liga = valor de plantilla Transfermarkt promedio de los equipos de la liga de origen** (de las páginas de competición de TM, ver paso 4 "datos nuevos"). Cubre las ligas con pocos o ningún traslado observado.
+- Para ligas de origen con pocos traslados, el coeficiente se encoge hacia el de un grupo de ligas de nivel similar (la iteración 1 usa medias ponderadas por número de traslados). **Exploración prevista para la iteración 2**: modelo bayesiano jerárquico en Stan con priors por tier de competición — los coeficientes por liga cuelgan de su tier, y el partial pooling gestiona la escasez de forma natural.
 - El experimento Forés marca el caso de prueba: Segunda → La Liga con datos de Biwenger en ambas, que sirve para verificar el método contra la verdad conocida.
 
 ## Integración con los modelos del paso 4
@@ -27,10 +28,11 @@ Un fichaje trae señal de tres sitios: sus estadísticas por partido en la liga 
 
 ## Orden de trabajo
 
-1. Detector de "jugador nuevo" en la ingesta diaria de Biwenger (aparece en plantilla sin `fantasy_points` histórico) → dispara la descarga bajo demanda.
-2. Tabla de traslados históricos entre ligas y estimación de coeficientes.
-3. Relleno de features/prior para jugadores nuevos + los 4 casos de aceptación.
-4. Backtest: fichajes reales de las temporadas 2023-24 a 2025-26, comparando el baseline contra sus puntos reales del primer tercio de temporada, y contra la alternativa ingenua (media de su posición).
+1. Detector de "jugador nuevo" en la ingesta diaria de Biwenger (aparece en plantilla sin `fantasy_points` histórico) → dispara la descarga bajo demanda de SofaScore **y Transfermarkt**.
+2. Registro retrospectivo de **debutantes** por temporada del backfill (tabla curada jugador-temporada de debut) + descarga bajo demanda de su historial en la liga de origen, sea cual sea la liga — los traslados del punto 3 no existen sin esto para fichajes llegados de fuera de Segunda y las 5 grandes.
+3. Tabla de traslados históricos entre ligas y estimación de coeficientes.
+4. Relleno de features/prior para jugadores nuevos + los 4 casos de aceptación.
+5. Backtest: fichajes reales de las temporadas 2023-24 a 2025-26, comparando el baseline contra sus puntos reales del primer tercio de temporada, y contra la alternativa ingenua (media de su posición).
 
 ## Hecho cuando
 
