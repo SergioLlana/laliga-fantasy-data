@@ -32,8 +32,8 @@ from lfdata.storage import Storage
 logger = logging.getLogger(__name__)
 
 # Temporada por defecto: saison_id de Transfermarkt es el año de inicio
-# (2025 = temporada 2025-26).
-DEFAULT_SEASON = 2025
+# (2026 = temporada 2026-27), la que está en curso.
+DEFAULT_SEASON = 2026
 
 # Cada tabla es un snapshot de historia completa por jugador; el upsert por club
 # la actualiza clave a clave. ``transfermarkt_players`` se indexa por ``id``.
