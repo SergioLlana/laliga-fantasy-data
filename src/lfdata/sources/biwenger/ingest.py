@@ -72,6 +72,10 @@ def ingest_squad(
 ) -> IngestResult:
     """Descarga la plantilla y publica biwenger_players y biwenger_teams.
 
+    La plantilla no trae fecha de nacimiento, así que las ``birth_date`` ya
+    presentes en el destino (aportadas por la ingesta de reports, #37) se
+    conservan; sin esto, cada refresco de plantilla las pondría a nulo.
+
     Devuelve el número de filas escritas por tabla.
     """
     transport = transport or HttpTransport(
@@ -81,10 +85,16 @@ def ingest_squad(
     client = BiwengerClient(transport, storage.raw)
     data = client.fetch_competition_data(competition).data
 
-    players = _players_frame(data.players.values())
+    partition = {"competition": competition}
+    existing = storage.curated.read_partition("biwenger_players", partition=partition)
+    births: dict[int, str | None] = {}
+    if "birth_date" in existing.columns:
+        known = existing.dropna(subset=["birth_date"])
+        births = dict(zip(known["id"].astype(int), known["birth_date"], strict=True))
+
+    players = _players_frame(data.players.values(), births)
     teams = pd.DataFrame([team.model_dump() for team in data.teams.values()])
 
-    partition = {"competition": competition}
     storage.curated.write_table("biwenger_players", players, partition=partition)
     storage.curated.write_table("biwenger_teams", teams, partition=partition)
     logger.info(
