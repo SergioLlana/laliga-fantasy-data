@@ -17,7 +17,11 @@ from lfdata.sources.http import HttpTransport
 from lfdata.storage import RawStore
 
 API_BASE = "https://cf.biwenger.com/api/v2"
-COMPETITIONS = ("la-liga", "segunda-division")
+# De Biwenger se ingiere exclusivamente La Liga (ADR 0008): sus ids de jugador y
+# equipo son distintos en cada competición, y una segunda competición partiría la
+# identidad canónica en dos. Segunda, Copa y demás son ligas de origen y se cubren
+# con Transfermarkt/SofaScore.
+COMPETITIONS = ("la-liga",)
 WAIT_SECONDS = 2.0
 # Campos del detalle por jugador: un report por partido (puntos en los cinco
 # sistemas, minutos y nota SofaScore vía rawStats) y el precio diario.

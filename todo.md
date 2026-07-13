@@ -1,24 +1,15 @@
 # Pendientes
 
-## El id de Biwenger no es estable entre competiciones
+## ~~El id de Biwenger no es estable entre competiciones~~ (resuelto 2026-07-13)
 
-Un jugador tiene **un id distinto en cada competición** de Biwenger. Boyomo es
-`33694` en La Liga, `22810` (slug `flavien-enzo-boyomo`) en Segunda División y
-`35488` en la Copa del Rey. Se ve en el campo `seasons` del detalle por jugador,
-que trae un `player: {id, slug}` propio por cada competición en la que jugó.
-
-Esto **romperá la integridad de los mappings en cuanto entre Segunda**: `players.csv`
-exige que cada `canonical_id` tenga como máximo una fila por fuente (ADR 0001), y
-el mismo jugador tendría dos ids de `biwenger`. Hoy no molesta porque solo se
-mapea `la-liga`, donde el id es único.
-
-- [ ] Decidir cómo se modela: ¿la fuente pasa a ser `biwenger:la-liga` /
-      `biwenger:segunda`? ¿O un `canonical_id` admite varias filas por fuente
-      cuando difieren en competición? Toca `store.py` (la regla de integridad),
-      el formato de los CSV y el ADR 0001.
-- [ ] Ojo al ascendido: es el caso que fuerza la decisión (un jugador de Segunda
-      que llega a La Liga tiene ficha e historial en las dos, y es justo de quien
-      más necesitamos el historial para el *baseline de fichaje*).
+Confirmado (y aplica también a equipos: Espanyol es `7` en La Liga y `542` en
+Segunda). Resuelto por la vía de no modelarlo: **de Biwenger se ingiere
+exclusivamente `la-liga`** y Segunda/Copa se cubren con Transfermarkt/SofaScore
+como cualquier liga de origen — [ADR 0008](docs/adr/0008-de-biwenger-solo-se-ingiere-la-liga.md).
+Guardarraíl en `COMPETITIONS` del cliente y en las opciones del CLI. El historial
+del ascendido para el *baseline de fichaje* sale de SofaScore, con su conteo de
+minutos (la validación tipo Forés con puntos reales de Segunda queda como
+experimento ad hoc contra raw).
 
 ## Cuando exista el código de la webapp (paso 6 del plan)
 
