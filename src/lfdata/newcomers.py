@@ -1,10 +1,11 @@
 """Detector de jugador nuevo y descarga bajo demanda (paso 5, orden de trabajo 1).
 
-Un **fichaje** es un jugador que aparece en la plantilla de Biwenger sin puntos en
-ninguna temporada anterior: no tiene historial en La Liga del que aprender, así
-que su proyección tendrá que salir de su historial en otra liga (el baseline de
-fichajes). Este módulo lo detecta en la ingesta diaria y dispara, sin intervención
-humana, las dos cosas que ese baseline necesita:
+Un **fichaje** es un jugador que aparece en la plantilla de una competición de
+Biwenger sin puntos en ninguna temporada anterior **de esa misma competición**: no
+tiene historial de La Liga del que aprender, así que su proyección tendrá que
+salir de su historial en otra liga (el baseline de fichajes). Este módulo lo
+detecta en la ingesta diaria y dispara, sin intervención humana, las dos cosas que
+ese baseline necesita:
 
 1. **Identidad** — refresca la plantilla de Transfermarkt de su club de llegada
    (una sola plantilla, no la competición entera) y ejecuta el matcher. El fichaje
@@ -12,10 +13,13 @@ humana, las dos cosas que ese baseline necesita:
 2. **Historial** — descarga de SofaScore su historial completo, venga de la liga
    que venga (el mecanismo bajo demanda de #11).
 
-Quien llega de Segunda **no** es un fichaje a estos efectos: sus puntos de
-Biwenger ya están curados (Segunda se ingiere igual que La Liga), y de ahí sale su
-baseline. El detector solo se dispara con quien no tiene puntos en ninguna de las
-dos competiciones.
+El ascendido de Segunda **también** es un fichaje (decidido el 2026-07-13): Segunda
+es una liga de origen como el Championship o el Brasileirão, y su salto se estima
+con el mismo método —eventing de SofaScore y valor de Transfermarkt, corregidos
+por el nivel de la liga de origen— y no con sus puntos de Biwenger en Segunda. Que
+esos puntos existan no cambia el baseline; lo que permiten es **validarlo**, que es
+justo lo que hace el experimento Forés: el único salto donde conocemos la verdad en
+ambos lados.
 
 El registro queda en la tabla curada ``newcomers``, con grano jugador-temporada de
 debut, que hace además de marca de idempotencia: un fichaje cuyo historial ya se
@@ -98,12 +102,14 @@ class Newcomer:
 
 
 def detect_newcomers(storage: Storage, competition: str, season: int) -> list[Newcomer]:
-    """Jugadores de la plantilla de ``competition`` sin historial de puntos.
+    """Jugadores de la plantilla de ``competition`` sin historial de puntos en ella.
 
-    El historial se mira en las temporadas **anteriores** a ``season`` y en ambas
-    competiciones: un jugador que ya puntuó antes —en La Liga o en Segunda— tiene
-    de dónde proyectar. Los puntos que lleve en la temporada en curso no le quitan
-    la condición de fichaje: acaba de llegar igualmente.
+    El historial se mira en las temporadas **anteriores** a ``season`` y solo en
+    ``competition``: quien sube de Segunda no tiene puntos de La Liga y por tanto es
+    un fichaje, igual que el que llega del Brasileirão —Segunda es una liga de
+    origen más, no un atajo—. Los puntos que un fichaje lleve ya en la temporada en
+    curso no le quitan la condición: lo que le falta es historial del que proyectar,
+    no minutos.
     """
     squad = storage.curated.read_partition(
         "biwenger_players", partition={"competition": competition}
@@ -111,7 +117,7 @@ def detect_newcomers(storage: Storage, competition: str, season: int) -> list[Ne
     if squad.empty:
         return []
 
-    veterans = _players_with_points_before(storage, season)
+    veterans = _players_with_points_before(storage, competition, season)
     newcomers = [
         Newcomer(
             player_id=int(row.id),
@@ -393,17 +399,20 @@ def _sofascore_id(store: MappingStore, canonical_id: str) -> str | None:
     return None if rows.empty else str(rows.iloc[0]["id_en_fuente"])
 
 
-def _players_with_points_before(storage: Storage, season: int) -> set[int]:
-    """IDs de Biwenger con puntos en alguna temporada anterior a ``season``."""
+def _players_with_points_before(storage: Storage, competition: str, season: int) -> set[int]:
+    """IDs de Biwenger con puntos en ``competition`` antes de ``season``."""
     ids: set[int] = set()
     for table in POINTS_TABLES:
         try:
             df = storage.curated.read_table(table)
         except (FileNotFoundError, OSError):
             continue
-        if df.empty or not {"player_id", "season"} <= set(df.columns):
+        if df.empty or not {"player_id", "season", "competition"} <= set(df.columns):
             continue
-        past = df[pd.to_numeric(df["season"], errors="coerce") < season]
+        past = df[
+            (df["competition"] == competition)
+            & (pd.to_numeric(df["season"], errors="coerce") < season)
+        ]
         ids |= {int(v) for v in past["player_id"].dropna()}
     return ids
 

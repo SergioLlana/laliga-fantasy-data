@@ -21,7 +21,7 @@ La predicción de puntos fantasy de un jugador, por jornada o por temporada, baj
 _Avoid_: forecast, predicción de rendimiento
 
 **Fichaje**:
-Un jugador que aparece en la plantilla de Biwenger sin puntos en ninguna temporada anterior: no tiene historial en La Liga del que proyectar. Quien llega de Segunda no lo es (sus puntos de Biwenger ya están curados). La ingesta diaria los detecta y les descarga identidad e historial bajo demanda.
+Un jugador que aparece en la plantilla de una competición de Biwenger sin puntos en ninguna temporada anterior de esa competición: no tiene historial de La Liga del que proyectar. El ascendido de Segunda también lo es —Segunda es una liga de origen como cualquier otra—. La ingesta diaria los detecta y les descarga identidad e historial bajo demanda.
 _Avoid_: jugador nuevo (ambiguo con el recién ascendido), debutante
 
 **Baseline de fichaje**:

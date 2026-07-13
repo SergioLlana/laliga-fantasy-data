@@ -185,13 +185,28 @@ def test_points_in_the_current_season_do_not_disqualify_a_newcomer(storage: Stor
     assert [n.player_id for n in detect_newcomers(storage, "la-liga", SEASON)] == [BIWENGER_FORES]
 
 
-def test_player_promoted_from_segunda_is_not_a_newcomer(storage: Storage) -> None:
-    # Sus puntos de Segunda ya están curados: su baseline sale de ahí (caso Forés
-    # del experimento), no de una descarga bajo demanda.
+def test_player_promoted_from_segunda_is_a_newcomer(storage: Storage) -> None:
+    # Segunda es una liga de origen más: que tenga puntos de Biwenger allí no le
+    # da historial de La Liga, así que su baseline sale del mismo sitio que el del
+    # que llega del Brasileirão (eventing de SofaScore + valor de Transfermarkt,
+    # corregidos por el nivel de la liga). Sus puntos de Segunda sirven para
+    # validar el método, no para alimentarlo.
     storage.curated.write_table(
         "fantasy_points",
         pd.DataFrame([{"player_id": BIWENGER_FORES, "points_as": 9}]),
         partition={"competition": "segunda-division", "season": "2025"},
+    )
+
+    assert [n.player_id for n in detect_newcomers(storage, "la-liga", SEASON)] == [BIWENGER_FORES]
+
+
+def test_points_in_a_past_season_of_the_same_competition_disqualify(storage: Storage) -> None:
+    # El veterano de la fixture puntuó en La Liga 2025; el que vuelve tras un año
+    # cedido en Segunda tampoco es un fichaje si ya jugó La Liga antes.
+    storage.curated.write_table(
+        "fantasy_points",
+        pd.DataFrame([{"player_id": BIWENGER_FORES, "points_as": 5}]),
+        partition={"competition": "la-liga", "season": "2024"},
     )
 
     assert detect_newcomers(storage, "la-liga", SEASON) == []

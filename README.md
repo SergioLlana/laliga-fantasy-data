@@ -45,7 +45,8 @@ uv run lfdata ingest sofascore --player 1086128
 uv run lfdata backfill sofascore --competition la-liga --season 2025 --max-matches 5
 
 # Detector de fichajes: quien está en la plantilla sin puntos en temporadas
-# anteriores. Refresca la plantilla de Transfermarkt de su club de llegada, lo
+# anteriores de esa competición (el ascendido de Segunda incluido: es una liga de
+# origen más). Refresca la plantilla de Transfermarkt de su club de llegada, lo
 # mapea (o lo encola a revisión) y descarga su historial de SofaScore
 uv run lfdata newcomers --competition la-liga --season 2026
 uv run lfdata newcomers --season 2026 --dry-run          # solo los lista, sin descargar

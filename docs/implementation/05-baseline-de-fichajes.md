@@ -11,7 +11,8 @@ Un fichaje trae señal de tres sitios: sus estadísticas por partido en la liga 
 - Se estima con los **traslados históricos**: jugadores de las 5 temporadas de backfill que cambiaron de liga, comparando su rendimiento por 90 minutos antes y después del salto. El destino es siempre La Liga, así que los coeficientes son por liga de origen (Portugal→La Liga, Championship→La Liga...).
 - Complemento decidido el 2026-07-12: una covariable continua de **nivel de liga = valor de plantilla Transfermarkt promedio de los equipos de la liga de origen** (de las páginas de competición de TM, ver paso 4 "datos nuevos"). Cubre las ligas con pocos o ningún traslado observado.
 - Para ligas de origen con pocos traslados, el coeficiente se encoge hacia el de un grupo de ligas de nivel similar (la iteración 1 usa medias ponderadas por número de traslados). **Exploración prevista para la iteración 2**: modelo bayesiano jerárquico en Stan con priors por tier de competición — los coeficientes por liga cuelgan de su tier, y el partial pooling gestiona la escasez de forma natural.
-- El experimento Forés marca el caso de prueba: Segunda → La Liga con datos de Biwenger en ambas, que sirve para verificar el método contra la verdad conocida.
+- **Segunda es una liga de origen más** (decidido el 2026-07-13): el ascendido se trata como cualquier otro fichaje —eventing de SofaScore y valor de Transfermarkt, corregidos por el coeficiente Segunda→Primera—, no con sus puntos de Biwenger en Segunda. Un método por competición de origen sería un caso especial que no escala, y el modelo no tendría cómo aprender el salto de Segunda si esa liga se saltara el mecanismo común.
+- Que en Segunda **sí** tengamos puntos de Biwenger es lo que la convierte en el banco de pruebas: es el único salto donde conocemos la verdad en ambos lados. El experimento Forés valida ahí el método (baseline predicho vs. puntos reales), sin que esos puntos alimenten el baseline.
 
 ## Integración con los modelos del paso 4
 
@@ -23,12 +24,12 @@ Un fichaje trae señal de tres sitios: sus estadísticas por partido en la liga 
 
 1. **Fichaje top-5**: delantero de la Premier con 3 temporadas de datos → baseline desde sus métricas ajustadas.
 2. **Fichaje bajo demanda**: lateral del Brasileirão → el pipeline descarga su historial de SofaScore solo, lo mapea (o lo encola a revisión) y produce baseline.
-3. **Ascendido de Segunda**: caso Forés → baseline directamente desde sus puntos Biwenger de Segunda con el coeficiente Segunda→Primera.
+3. **Ascendido de Segunda**: caso Forés → mismo camino que cualquier fichaje (eventing de SofaScore en Segunda + valor Transfermarkt, con el coeficiente Segunda→Primera). Sus puntos de Biwenger en Segunda no entran en el baseline: son la verdad contra la que se comprueba.
 4. **Sin datos**: juvenil sin historial en ninguna fuente → baseline mínimo por posición + precio Biwenger, marcado como "confianza baja" (la web debe poder distinguirlo).
 
 ## Detector de jugador nuevo (hecho, 2026-07-12)
 
-`lfdata newcomers --competition la-liga --season 2026` (módulo `lfdata.newcomers`, issue #19). Un **fichaje** es quien aparece en la plantilla de Biwenger sin puntos en ninguna temporada **anterior**, en ninguna de las dos competiciones: quien llega de Segunda no cuenta —sus puntos de Biwenger ya están curados y de ahí sale su baseline (caso Forés)—, y los puntos que un fichaje lleve ya en la temporada en curso no le quitan la condición, porque lo que le falta es historial del que proyectar.
+`lfdata newcomers --competition la-liga --season 2026` (módulo `lfdata.newcomers`, issue #19). Un **fichaje** es quien aparece en la plantilla de una competición de Biwenger sin puntos en ninguna temporada **anterior de esa misma competición**. El ascendido de Segunda lo es (no tiene puntos de La Liga, y Segunda es una liga de origen más), y los puntos que un fichaje lleve ya en la temporada en curso no le quitan la condición, porque lo que le falta es historial del que proyectar, no minutos.
 
 Por cada fichaje detectado, sin intervención humana:
 
