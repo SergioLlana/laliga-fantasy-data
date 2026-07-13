@@ -15,6 +15,7 @@ mapping a IDs canónicos es un paso posterior):
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 
 import pandas as pd
@@ -23,6 +24,7 @@ from lfdata.sources.http import HttpTransport, SourceHTTPError, scrapeops_proxy_
 from lfdata.sources.ingestion import IngestResult, PlayerFailure
 from lfdata.sources.transfermarkt.client import PROXY_OVERFLOW, WAIT_SECONDS, TransfermarktClient
 from lfdata.sources.transfermarkt.parse import (
+    Club,
     availability_rows,
     market_value_rows,
     transfer_rows,
@@ -95,6 +97,114 @@ def ingest_squads(
     if max_clubs is not None:
         clubs = clubs[:max_clubs]
 
+    squad_partition = {"competition": competition, "season": str(season)}
+    result, seen_player_ids, squad_failures = _ingest_clubs(
+        storage, client, competition, clubs, season=season, since_days=since_days
+    )
+
+    if full_refresh and squad_failures:
+        # Alguna plantilla no se pudo leer: sus jugadores no están en
+        # ``seen_player_ids``, así que retirar ahora los borraría por un fallo
+        # transitorio, no por una baja real. Se omite la poda hasta un refresh
+        # que recorra la competición entera sin fallos de plantilla.
+        logger.warning(
+            "transfermarkt %s: %d plantillas fallaron; se omite la retirada de "
+            "jugadores para no borrar a nadie por un fallo transitorio",
+            competition,
+            squad_failures,
+        )
+    elif full_refresh:
+        # La poda es dentro de la temporada: retira a quien ya no está en ninguna
+        # plantilla *de esta temporada*, sin tocar las demás.
+        removed = storage.curated.retain_keys(
+            "transfermarkt_players", seen_player_ids, key="id", partition=squad_partition
+        )
+        if removed:
+            logger.info(
+                "transfermarkt %s %d: %d jugadores retirados (ya no en ninguna plantilla)",
+                competition,
+                season,
+                removed,
+            )
+
+    logger.info(
+        "transfermarkt %s: %d jugadores curados, %d fallidos",
+        competition,
+        result.rows["transfermarkt_players"],
+        len(result.failures),
+    )
+    return result
+
+
+def ingest_clubs(
+    storage: Storage,
+    competition: str,
+    club_ids: Iterable[int],
+    *,
+    season: int = DEFAULT_SEASON,
+    transport: HttpTransport | None = None,
+    since_days: int | None = None,
+) -> IngestResult:
+    """Refresh dirigido: solo las plantillas de ``club_ids``, sin poda.
+
+    Lo que el detector de jugador nuevo necesita: cuando un fichaje aparece en la
+    plantilla de Biwenger, su contraparte de Transfermarkt está en el kader de su
+    club de llegada, y recorrer la competición entera (miles de peticiones) para
+    llegar a un club es desproporcionado.
+
+    Nunca retira a nadie: solo se han visto los jugadores de esos clubes, así que
+    la poda —que es lo que da sentido a un refresh completo— no aplica aquí.
+    """
+    transport = transport or HttpTransport(
+        wait_seconds=WAIT_SECONDS,
+        overflow_proxy=scrapeops_proxy_from_env(enabled=PROXY_OVERFLOW),
+    )
+    client = TransfermarktClient(transport, storage.raw)
+
+    wanted = set(club_ids)
+    clubs = [
+        c for c in client.fetch_competition_clubs(competition, season=season) if c.id in wanted
+    ]
+    missing = wanted - {club.id for club in clubs}
+    if missing:
+        logger.warning(
+            "transfermarkt %s %d: los clubes %s no están en la competición esa temporada",
+            competition,
+            season,
+            sorted(missing),
+        )
+
+    result, _, _ = _ingest_clubs(
+        storage, client, competition, clubs, season=season, since_days=since_days
+    )
+    logger.info(
+        "transfermarkt %s %d: %d clubes refrescados, %d jugadores curados, %d fallidos",
+        competition,
+        season,
+        len(clubs),
+        result.rows["transfermarkt_players"],
+        len(result.failures),
+    )
+    return result
+
+
+def _ingest_clubs(
+    storage: Storage,
+    client: TransfermarktClient,
+    competition: str,
+    clubs: list[Club],
+    *,
+    season: int,
+    since_days: int | None,
+) -> tuple[IngestResult, set[int], int]:
+    """Recorre los clubes dados y vuelca sus cinco tablas, club a club.
+
+    Devuelve el resultado, los ids de jugador vistos en plantilla (los que un
+    refresh completo puede podar) y cuántas plantillas fallaron. Es el núcleo
+    compartido por el recorrido de la competición (:func:`ingest_squads`) y el
+    refresh dirigido (:func:`ingest_clubs`); la única diferencia entre ambos es
+    qué clubes llegan aquí y si después se poda.
+    """
     # ``transfermarkt_players`` es la pertenencia a una plantilla, así que se
     # particiona también por temporada: ingerir 2023 no puede podar a los
     # jugadores de 2026. Las otras cuatro tablas son el histórico del jugador
@@ -218,38 +328,7 @@ def ingest_squads(
             storage.curated.upsert_table(table, frame, key=_TABLE_KEYS[table], partition=where)
             result.rows[table] += len(frame)
 
-    if full_refresh and squad_failures:
-        # Alguna plantilla no se pudo leer: sus jugadores no están en
-        # ``seen_player_ids``, así que retirar ahora los borraría por un fallo
-        # transitorio, no por una baja real. Se omite la poda hasta un refresh
-        # que recorra la competición entera sin fallos de plantilla.
-        logger.warning(
-            "transfermarkt %s: %d plantillas fallaron; se omite la retirada de "
-            "jugadores para no borrar a nadie por un fallo transitorio",
-            competition,
-            squad_failures,
-        )
-    elif full_refresh:
-        # La poda es dentro de la temporada: retira a quien ya no está en ninguna
-        # plantilla *de esta temporada*, sin tocar las demás.
-        removed = storage.curated.retain_keys(
-            "transfermarkt_players", seen_player_ids, key="id", partition=squad_partition
-        )
-        if removed:
-            logger.info(
-                "transfermarkt %s %d: %d jugadores retirados (ya no en ninguna plantilla)",
-                competition,
-                season,
-                removed,
-            )
-
-    logger.info(
-        "transfermarkt %s: %d jugadores curados, %d fallidos",
-        competition,
-        result.rows["transfermarkt_players"],
-        len(result.failures),
-    )
-    return result
+    return result, seen_player_ids, squad_failures
 
 
 def _scraped_within(storage: Storage, player_id: int, since_days: int) -> bool:

@@ -20,6 +20,10 @@ _Avoid_: scoring, modo
 La predicción de puntos fantasy de un jugador, por jornada o por temporada, bajo un sistema de puntuación concreto.
 _Avoid_: forecast, predicción de rendimiento
 
+**Fichaje**:
+Un jugador que aparece en la plantilla de una competición de Biwenger sin puntos en ninguna temporada anterior de esa competición: no tiene historial de La Liga del que proyectar. El ascendido de Segunda también lo es —Segunda es una liga de origen como cualquier otra—. La ingesta diaria los detecta y les descarga identidad e historial bajo demanda.
+_Avoid_: jugador nuevo (ambiguo con el recién ascendido), debutante
+
 **Baseline de fichaje**:
 La proyección inicial de un jugador recién llegado a La Liga, estimada a partir de su historial en otras ligas.
 _Avoid_: cold start (jerga)
