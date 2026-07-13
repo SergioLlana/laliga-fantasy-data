@@ -9,7 +9,7 @@ from datetime import UTC, date, datetime, timedelta
 import pandas as pd
 
 from lfdata.sources.biwenger.client import PROXY_OVERFLOW, WAIT_SECONDS, BiwengerClient
-from lfdata.sources.biwenger.models import Player, PlayerDetail, RoundData
+from lfdata.sources.biwenger.models import CompetitionData, Player, PlayerDetail, RoundData
 from lfdata.sources.http import HttpTransport, SourceHTTPError, scrapeops_proxy_from_env
 from lfdata.sources.ingestion import IngestResult, PlayerFailure
 from lfdata.storage import Storage
@@ -29,6 +29,14 @@ POINT_COLUMNS = list(POINT_SYSTEMS.values())
 # Motivo de anomalía: reports que Biwenger sirve con puntos pero sin rawStats.
 POINTS_WITHOUT_STATS = "reports con puntos sin rawStats"
 
+# Biwenger publica a los entrenadores en la misma lista que a los jugadores, con
+# ficha propia (precio, puntos): Flick, Mourinho, Simeone... No son jugadores —no
+# existen en la plantilla de Transfermarkt ni tienen minutos ni eventing—, así que
+# quedan fuera de biwenger_players y de sus puntos. Sin este filtro contaminan el
+# mapping: el entrenador Simeone compite con su hijo Giuliano por la misma ficha de
+# Transfermarkt y ninguno de los dos llega a aprobarse.
+COACH_POSITION = 5
+
 # Los reports se escriben por lotes de este tamaño (en jugadores): un fallo tras
 # el jugador N conserva en curated todo lote ya volcado, en vez de tirar el run.
 REPORTS_BATCH_SIZE = 25
@@ -44,6 +52,11 @@ _PLAYER_NULLABLE_INTS = [
     "played_away",
     "points_last_season",
 ]
+
+
+def squad_players(data: CompetitionData) -> list[Player]:
+    """Los jugadores de la plantilla, sin los entrenadores (:data:`COACH_POSITION`)."""
+    return [player for player in data.players.values() if player.position != COACH_POSITION]
 
 
 def _players_frame(
@@ -92,7 +105,7 @@ def ingest_squad(
         known = existing.dropna(subset=["birth_date"])
         births = dict(zip(known["id"].astype(int), known["birth_date"], strict=True))
 
-    players = _players_frame(data.players.values(), births)
+    players = _players_frame(squad_players(data), births)
     teams = pd.DataFrame([team.model_dump() for team in data.teams.values()])
 
     storage.curated.write_table("biwenger_players", players, partition=partition)
@@ -352,7 +365,7 @@ def ingest_reports(
         storage,
         competition,
         season,
-        list(data.players.values()),
+        squad_players(data),
         since_days=since_days,
         resume=resume,
     )
@@ -415,7 +428,7 @@ def ingest_reports_delta(
     )
     client = BiwengerClient(transport, storage.raw)
     data = client.fetch_competition_data(competition).data
-    squad = {player.id: player for player in data.players.values()}
+    squad = {player.id: player for player in squad_players(data)}
 
     partition = {"competition": competition, "season": season}
     processed = {

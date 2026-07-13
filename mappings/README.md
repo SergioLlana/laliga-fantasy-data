@@ -5,13 +5,33 @@ canónico** (ADR 0001). Vive en git, no en S3: el trabajo manual de revisión es
 código y se revisa en pull request.
 
 Anclamos la identidad en **Biwenger** (el universo que la plataforma necesita) y
-buscamos su contraparte en **Transfermarkt** por club mapeado + nombre
-normalizado. La ingesta de reports rellena la fecha de nacimiento en
-`biwenger_players` desde el detalle por jugador (issue #37): un homónimo único en
-el club solo se aprueba en `auto` si su fecha coincide con la de Transfermarkt o
-falta alguna de las dos; si discrepan, va a revisión con motivo
-`fecha-discrepante` y ambas fechas (`biwenger_birth_date` y `tm_birth_date`) como
-evidencia del desempate.
+buscamos su contraparte en **Transfermarkt**.
+
+## Cómo se busca la contraparte
+
+El **club es una pista, no un filtro**: acota el pool para que un homónimo único
+baste, pero quien no esté en él se busca igual en todas las temporadas
+descargadas. La identidad de una persona no tiene temporada; la pertenencia a una
+plantilla, sí. Por eso `--season` decide *de qué plantillas salen los clubes* (año
+de inicio; la actual por defecto) y no *a quién se puede mapear*: Biwenger conserva
+la ficha de quien ya dejó la liga, y su contraparte vive en la temporada en la que
+jugó.
+
+La **fecha de nacimiento** (que la ingesta de reports rellena en `biwenger_players`
+desde el detalle por jugador, issue #37) es la que gradúa la confianza según de
+dónde salga el candidato:
+
+| De dónde sale el candidato | Qué se exige para aprobarlo en `auto` |
+|---|---|
+| Del club ya mapeado | Un único homónimo. La fecha solo **descarta**: si discrepa, va a revisión. |
+| Del club, sin homónimo, por fecha | Un único jugador del club nacido ese mismo día. Rescata al que el apodo escondía: `Ez Abde` ↔ `Abde Ezzalzouli`, `Yusi` ↔ `Youssef Enríquez`. |
+| Del pool global (sin club, o sin nadie compatible en él) | Ahí el pool son miles y un apellido suelto no identifica a nadie: la fecha tiene que **confirmar**. Sin fecha que verificar, a revisión. |
+
+Los **entrenadores** no entran: Biwenger los publica en la misma lista que a los
+jugadores, con ficha, precio y puntos, pero no existen en la plantilla de
+Transfermarkt. La ingesta los deja fuera de `biwenger_players` (`position` 5), y
+con ello desaparece un conflicto que bloqueaba a dos: el entrenador *Simeone*
+competía con su hijo *Giuliano* por la misma ficha de Transfermarkt.
 
 ## Ficheros
 
@@ -22,12 +42,20 @@ evidencia del desempate.
 
 ## Flujo
 
-`transfermarkt_players` está particionada por temporada, así que `lfdata map`
-busca la contraparte en las plantillas de la temporada que se le pida
-(`--season`, año de inicio; la actual por defecto).
-
 1. `lfdata map` regenera candidatos: aprueba los seguros (`auto`) y deja los
-   dudosos en los ficheros de revisión.
+   dudosos en los ficheros de revisión, cada uno con el motivo por el que no se
+   pudo aprobar solo:
+
+   - `varios-en-club` — más de un homónimo dentro del club.
+   - `fecha-discrepante` — candidato único, pero las dos fuentes no coinciden en
+     la fecha de nacimiento (ambas se muestran como evidencia del desempate).
+   - `sin-fecha-que-verificar` — único homónimo fuera de su club, pero a alguna de
+     las dos fuentes le falta la fecha: nada confirma que sea él.
+   - `varios-candidatos` / `varios-misma-fecha` — la evidencia no distingue entre
+     varios.
+   - `candidato-compartido` — dos entidades de Biwenger se disputan el mismo
+     candidato; ninguna se aprueba y ambas se muestran juntas.
+   - `sin-candidato` — nadie compatible en ninguna temporada descargada.
 2. Rellena a mano la columna `decision` de los dudosos:
    - `y` en la fila del candidato correcto de Transfermarkt.
    - `skip` si el jugador no tiene contraparte en Transfermarkt (se le da ID
