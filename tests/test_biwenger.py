@@ -149,6 +149,23 @@ def test_unknown_competition_rejected(storage: Storage) -> None:
         client.fetch_competition_data("premier")
 
 
+def test_segunda_division_rejected(storage: Storage) -> None:
+    """De Biwenger se ingiere exclusivamente La Liga (ADR 0008).
+
+    Sus ids de jugador y equipo cambian por competición (Boyomo: 33694 en La
+    Liga, 22810 en Segunda), así que una segunda competición partiría la
+    identidad canónica en dos. Segunda es una liga de origen: Transfermarkt y
+    SofaScore.
+    """
+    client = BiwengerClient(FakeTransport(b"{}"), storage.raw)
+    with pytest.raises(ValueError, match="segunda-division"):
+        client.fetch_competition_data("segunda-division")
+    with pytest.raises(ValueError, match="segunda-division"):
+        client.fetch_player_reports("segunda-division", "alex-fores", "2025")
+    with pytest.raises(ValueError, match="segunda-division"):
+        client.fetch_round("segunda-division", 1, 1)
+
+
 def test_ingest_squad_writes_curated_tables(storage: Storage, tmp_path: Path) -> None:
     result = ingest_squad(storage, "la-liga", transport=FakeTransport(FIXTURE.read_bytes()))
     assert result.rows == {"biwenger_players": 9, "biwenger_teams": 4}
@@ -217,12 +234,17 @@ def test_player_reports_contract_la_liga(storage: Storage) -> None:
     assert len(detail.prices) == 4
 
 
-def test_player_reports_contract_segunda_has_no_sofascore(storage: Storage) -> None:
-    """En Segunda el detalle no trae nota SofaScore ni los sistemas 5/6."""
+def test_player_reports_tolerate_missing_grade_and_systems(storage: Storage) -> None:
+    """El modelo admite reports sin nota SofaScore ni sistemas 5/6.
+
+    El fixture es una respuesta real de Segunda (del experimento Forés, cuando
+    aún se descargaba): Biwenger ya solo se ingiere para la-liga (ADR 0008),
+    pero esa forma incompleta protege contra la variabilidad de la fuente.
+    """
     transport = FakeTransport(PLAYER_SEGUNDA.read_bytes())
     detail = (
         BiwengerClient(transport, storage.raw)
-        .fetch_player_reports("segunda-division", "alex-fores", "2025")
+        .fetch_player_reports("la-liga", "alex-fores", "2025")
         .data
     )
 
@@ -300,12 +322,13 @@ def test_ingest_reports_writes_both_tables(storage: Storage, tmp_path: Path) -> 
     assert first["price"] == 230000
 
 
-def test_ingest_reports_segunda_leaves_sofascore_null(storage: Storage) -> None:
+def test_ingest_reports_leaves_missing_grade_and_systems_null(storage: Storage) -> None:
+    """Un detalle sin nota ni sistema 5 (fixture real de Segunda) cura columnas nulas."""
     transport = RoutingTransport(_competition_payload("alex-fores"), PLAYER_SEGUNDA.read_bytes())
-    ingest_reports(storage, "segunda-division", "2025", transport=transport)
+    ingest_reports(storage, "la-liga", "2025", transport=transport)
     points = storage.curated.read_table("fantasy_points")
     assert points["sofascore_grade"].isna().all()
-    assert points["points_media"].isna().all()  # sistema 5 ausente en Segunda
+    assert points["points_media"].isna().all()  # sistema 5 ausente en el detalle
     assert "draw" in set(points["result"])  # el 1-1 queda como empate
 
 

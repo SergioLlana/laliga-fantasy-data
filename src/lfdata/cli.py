@@ -33,8 +33,8 @@ def build_parser() -> argparse.ArgumentParser:
     biwenger.add_argument(
         "--competition",
         required=True,
-        choices=("la-liga", "segunda-division"),
-        help="Competición a ingerir",
+        choices=("la-liga",),
+        help="Competición a ingerir (de Biwenger solo se ingiere la-liga, ADR 0008)",
     )
     biwenger.add_argument(
         "--season",
@@ -82,8 +82,8 @@ def build_parser() -> argparse.ArgumentParser:
     rounds.add_argument(
         "--competition",
         required=True,
-        choices=("la-liga", "segunda-division"),
-        help="Competición a ingerir",
+        choices=("la-liga",),
+        help="Competición a ingerir (de Biwenger solo se ingiere la-liga, ADR 0008)",
     )
     rounds.add_argument(
         "--season",
@@ -242,8 +242,8 @@ def build_parser() -> argparse.ArgumentParser:
     quota.add_argument(
         "--competition",
         default="la-liga",
-        choices=("la-liga", "segunda-division"),
-        help="Competición cuyos jugadores se sondean (por defecto la-liga)",
+        choices=("la-liga",),
+        help="Competición cuyos jugadores se sondean (de Biwenger solo la-liga, ADR 0008)",
     )
     quota.add_argument(
         "--season",
@@ -303,8 +303,8 @@ def build_parser() -> argparse.ArgumentParser:
     direct.add_argument(
         "--competition",
         default="la-liga",
-        choices=("la-liga", "segunda-division"),
-        help="Competición cuyos jugadores se sondean en Biwenger (por defecto la-liga)",
+        choices=("la-liga",),
+        help="Competición cuyos jugadores se sondean en Biwenger (solo la-liga, ADR 0008)",
     )
     direct.add_argument(
         "--season",
@@ -340,8 +340,8 @@ def build_parser() -> argparse.ArgumentParser:
     newcomers.add_argument(
         "--competition",
         default="la-liga",
-        choices=("la-liga", "segunda-division"),
-        help="Competición cuya plantilla se inspecciona (por defecto la-liga)",
+        choices=("la-liga",),
+        help="Competición cuya plantilla se inspecciona (de Biwenger solo la-liga, ADR 0008)",
     )
     newcomers.add_argument(
         "--season",

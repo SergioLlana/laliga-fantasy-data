@@ -17,9 +17,10 @@ uv sync --dev
 ```bash
 uv run lfdata --help
 
-# Ingesta de la plantilla de una competición de Biwenger
+# Ingesta de la plantilla de Biwenger (solo la-liga: sus ids cambian por
+# competición y romperían los mappings — ADR 0008; Segunda y Copa se cubren
+# con Transfermarkt/SofaScore como ligas de origen)
 uv run lfdata ingest biwenger --competition la-liga
-uv run lfdata ingest biwenger --competition segunda-division
 
 # Ingesta de Transfermarkt: plantillas por club, perfiles, valores y traspasos
 # (espera 4 s entre peticiones; --max-clubs limita el recorrido para una prueba)
