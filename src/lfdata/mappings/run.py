@@ -5,9 +5,11 @@ plataforma necesita) y buscamos su contraparte en Transfermarkt:
 
 1. **Equipos primero** — cada club de Biwenger se mapea por nombre a un club de
    Transfermarkt; los jugadores se buscan luego dentro del club ya mapeado.
-2. **Jugadores** — dentro del club canónico del jugador, un único candidato con
-   nombre compatible se aprueba solo (``auto``); varios candidatos, o candidatos
-   en otro club (posible cesión), o ninguno, van al fichero de revisión.
+2. **Jugadores** — el club es una *pista*, no un filtro: acota el pool para que un
+   homónimo único baste, pero quien no esté en él se busca igual en todas las
+   temporadas descargadas. La fecha de nacimiento es la que gradúa la confianza:
+   dentro del club solo descarta (y rescata al que el apodo escondía), mientras
+   que en el pool global tiene que confirmar la identidad para aprobar.
 
 La asignación automática es **global, no greedy por orden de id** (issue #40): se
 calculan todas las compatibilidades sobre un scope fijo y solo se auto-aprueban
@@ -31,7 +33,13 @@ from datetime import UTC, datetime
 
 import pandas as pd
 
-from lfdata.mappings.matcher import birthdate_compatible, player_candidates, team_candidates
+from lfdata.mappings.matcher import (
+    birthdate_candidates,
+    birthdate_compatible,
+    birthdate_matches,
+    player_candidates,
+    team_candidates,
+)
 from lfdata.mappings.store import (
     BIWENGER,
     PLAYER_REVIEW_COLUMNS,
@@ -271,27 +279,31 @@ def run_map(
 ) -> MapReport:
     """Regenera candidatos y aplica decisiones; devuelve el resumen.
 
-    ``transfermarkt_players`` está particionada por temporada (un jugador
-    pertenece a una plantilla *de una temporada*), así que buscamos la
-    contraparte de Biwenger en la temporada pedida: la actual por defecto.
+    ``transfermarkt_players`` está particionada por temporada porque la
+    pertenencia a un club lo está, pero la **identidad no tiene temporada**. Por
+    eso ``season`` decide de qué plantillas salen los clubes (la actual por
+    defecto) y no a quién se puede mapear: la contraparte de un jugador se busca
+    en todas las temporadas descargadas. Si solo se mirase la temporada pedida,
+    quien ya no está en la plantilla actual —Biwenger conserva su ficha— no
+    tendría contraparte posible, cuando sí la tiene en la temporada en que jugó.
     """
     today = today or _today()
     biw_players = _read_curated(
         storage, "biwenger_players", ["id", "name", "team_id", "birth_date", "competition"]
     )
     biw_teams = _read_curated(storage, "biwenger_teams", ["id", "name", "competition"])
-    tm_players = _read_curated(
+    tm_all = _read_curated(
         storage,
         "transfermarkt_players",
         ["id", "name", "club_id", "club_name", "birth_date", "position", "competition", "season"],
     )
-    tm_players = tm_players[tm_players["season"].astype(str) == str(season)]
+    tm_season = tm_all[tm_all["season"].astype(str) == str(season)]
 
     store = MappingStore(mappings_dir)
     store.load()
 
-    unapplied = _map_teams(store, biw_teams, tm_players, today)
-    unapplied += _map_players(store, biw_players, tm_players, today)
+    unapplied = _map_teams(store, biw_teams, tm_season, today)
+    unapplied += _map_players(store, biw_players, tm_season, tm_all, today)
 
     store.save()
     report = _report(store, biw_teams, biw_players)
@@ -407,28 +419,93 @@ def _team_review_rows(
 # --- jugadores ---------------------------------------------------------------
 
 
+def _tm_record(row) -> dict:
+    return {
+        "id": str(int(row.id)),
+        "name": str(row.name),
+        "club_name": "" if pd.isna(row.club_name) else str(row.club_name),
+        "birth_date": "" if pd.isna(row.birth_date) else str(row.birth_date)[:10],
+        "position": "" if pd.isna(row.position) else str(row.position),
+        "season": "" if pd.isna(row.season) else str(row.season),
+    }
+
+
+def _global_pool(tm_all: pd.DataFrame) -> list[dict]:
+    """Un registro por jugador de Transfermarkt, con su club más reciente.
+
+    El mismo jugador aparece en una fila por temporada en la que estuvo en una
+    plantilla; para el matching solo importa su identidad, así que nos quedamos
+    con la fila de la temporada más alta (el club que mostramos al revisor es
+    entonces el último que se le conoce).
+    """
+    rows = tm_all.dropna(subset=["id"])
+    if rows.empty:
+        return []
+    latest = rows.sort_values("season").drop_duplicates(subset=["id"], keep="last")
+    return [_tm_record(row) for row in latest.itertuples()]
+
+
+def _candidates(
+    name: str, birth_date: str, in_club: list[dict], pool: list[dict]
+) -> tuple[list[dict], str]:
+    """Candidatos de Transfermarkt para un jugador de Biwenger, y de dónde salen.
+
+    Tres niveles de evidencia, de más a menos concluyente:
+
+    - ``club`` — homónimo dentro de su club ya mapeado (el caso normal).
+    - ``club-fecha`` — nadie con nombre compatible en el club, pero sí alguien
+      nacido el mismo día: el apodo de Biwenger no comparte tokens con el nombre
+      de Transfermarkt (``Ez Abde`` / ``Abde Ezzalzouli``) y la fecha lo delata.
+    - ``global`` — sin club (Biwenger conserva la ficha de quien ya no juega en la
+      liga) o sin nadie compatible en él: se busca en todas las temporadas.
+    """
+    by_name = player_candidates(name, in_club)
+    if by_name:
+        return by_name, "club"
+    by_birth = birthdate_candidates(birth_date, in_club)
+    if by_birth:
+        return by_birth, "club-fecha"
+    return player_candidates(name, pool), "global"
+
+
+def _reserved_by_birthdate(proposals: list[tuple]) -> dict[str, str]:
+    """Candidatos que la fecha de nacimiento adjudica a un único jugador de Biwenger.
+
+    Quien tiene su identidad probada por la fecha se lleva a su candidato, y los
+    demás lo pierden de su lista: si no, una ficha huérfana de nombre genérico
+    —Biwenger conserva un ``Thomas`` y un ``Adrián`` sin equipo— reclama a todos
+    sus homónimos y bloquea a quien está identificado sin ninguna duda. Lemar nació
+    el día exacto de Thomas Lemar, pero ``Thomas`` le disputaba el candidato y
+    ninguno de los dos se aprobaba. Un candidato confirmado por dos no lo adjudica
+    nadie: esa disputa es real y va a revisión.
+    """
+    claims: dict[str, set[str]] = defaultdict(set)
+    for biw_id, _, _, _, _, confirmed in proposals:
+        if len(confirmed) == 1:
+            claims[confirmed[0]["id"]].add(biw_id)
+    return {tm_id: next(iter(owners)) for tm_id, owners in claims.items() if len(owners) == 1}
+
+
 def _map_players(
-    store: MappingStore, biw_players: pd.DataFrame, tm_players: pd.DataFrame, today: str
+    store: MappingStore,
+    biw_players: pd.DataFrame,
+    tm_season: pd.DataFrame,
+    tm_all: pd.DataFrame,
+    today: str,
 ) -> list[UnappliedDecision]:
-    # Club de Transfermarkt -> equipo canónico -> jugadores de ese equipo.
+    # Club de Transfermarkt -> equipo canónico -> jugadores de ese equipo. El club
+    # sale de la temporada pedida (la pertenencia a una plantilla es de un año);
+    # la identidad, de todas (``pool``).
     tm_club_to_canonical = store.canonical_by_source(store.teams, TRANSFERMARKT)
     biw_team_to_canonical = store.canonical_by_source(store.teams, BIWENGER)
 
     tm_by_canonical: dict[str, list[dict]] = defaultdict(list)
-    tm_all: list[dict] = []
-    for row in tm_players.dropna(subset=["id"]).itertuples():
-        record = {
-            "id": str(int(row.id)),
-            "name": str(row.name),
-            "club_name": "" if pd.isna(row.club_name) else str(row.club_name),
-            "birth_date": "" if pd.isna(row.birth_date) else str(row.birth_date)[:10],
-            "position": "" if pd.isna(row.position) else str(row.position),
-        }
-        tm_all.append(record)
+    for row in tm_season.dropna(subset=["id"]).itertuples():
         if not pd.isna(row.club_id):
             canonical = tm_club_to_canonical.get(str(int(row.club_id)))
             if canonical:
-                tm_by_canonical[canonical].append(record)
+                tm_by_canonical[canonical].append(_tm_record(row))
+    pool = _global_pool(tm_all)
 
     approved = store.approved_ids(store.players, BIWENGER)
     taken = store.approved_ids(store.players, TRANSFERMARKT)
@@ -445,12 +522,12 @@ def _map_players(
         today=today,
     )
 
-    # Grafo bipartito por equipo canónico sobre un scope fijo (jugadores del club
-    # no tomados). Se calcula primero para todos y solo después se auto-aprueba,
-    # de modo que dos jugadores de Biwenger que se disputen el mismo homónimo de
-    # Transfermarkt vayan ambos a revisión, sin que el orden decida.
-    pending: list[tuple[str, object, str | None, str, list[dict]]] = []
-    tm_suitors: dict[str, set[str]] = defaultdict(set)
+    # Grafo bipartito sobre un scope fijo (los no tomados). Se calcula primero
+    # para todos y solo después se auto-aprueba, de modo que dos jugadores de
+    # Biwenger que se disputen el mismo candidato de Transfermarkt vayan ambos a
+    # revisión, sin que el orden de los ids decida por nosotros.
+    free_pool = [c for c in pool if c["id"] not in taken]
+    proposals: list[tuple[str, object, str, list[dict], str, list[dict]]] = []
     for player in biw_players.sort_values(["competition", "id"]).itertuples():
         biw_id = str(int(player.id))
         if biw_id in approved:
@@ -466,38 +543,47 @@ def _map_players(
             for c in (tm_by_canonical.get(canonical_team, []) if canonical_team else [])
             if c["id"] not in taken
         ]
-        cands = player_candidates(str(player.name), in_club)
-        pending.append((biw_id, player, canonical_team, biw_birth, cands))
+        cands, scope = _candidates(str(player.name), biw_birth, in_club, free_pool)
+        confirmed = [c for c in cands if birthdate_matches(biw_birth, c["birth_date"])]
+        proposals.append((biw_id, player, biw_birth, cands, scope, confirmed))
+
+    reserved = _reserved_by_birthdate(proposals)
+
+    pending: list[tuple[str, object, str, list[dict], str]] = []
+    tm_suitors: dict[str, set[str]] = defaultdict(set)
+    for biw_id, player, biw_birth, cands, scope, confirmed in proposals:
+        if len(confirmed) == 1 and reserved.get(confirmed[0]["id"]) == biw_id:
+            cands = confirmed
+        else:
+            cands = [c for c in cands if reserved.get(c["id"], biw_id) == biw_id]
+        pending.append((biw_id, player, biw_birth, cands, scope))
         for c in cands:
             tm_suitors[c["id"]].add(biw_id)
 
     review_rows: list[dict] = []
-    for biw_id, player, canonical_team, biw_birth, cands in pending:
+    for biw_id, player, biw_birth, cands, scope in pending:
         if any(len(tm_suitors[c["id"]]) > 1 for c in cands):
-            # Algún candidato en el club lo reclama también otro jugador de
-            # Biwenger: nadie se auto-aprueba; a revisión con el cuadro completo.
+            # Algún candidato lo reclama también otro jugador de Biwenger: nadie
+            # se auto-aprueba; todos a revisión con el cuadro completo.
             review_rows += [
                 _player_row(biw_id, player, c, "candidato-compartido", biw_birth) for c in cands
             ]
             continue
-        if len(cands) == 1:
-            only = cands[0]
-            if birthdate_compatible(biw_birth, only["birth_date"]):
-                store.add_player(
-                    store.new_player_canonical(),
-                    [(BIWENGER, biw_id), (TRANSFERMARKT, only["id"])],
-                    method="auto",
-                    date=today,
-                )
-                approved.add(biw_id)
-                continue
-            # Homónimo único en el club pero con fecha discrepante: no se aprueba
-            # solo; va a revisión con ambas fechas como evidencia del desempate.
-            review_rows.append(_player_row(biw_id, player, only, "fecha-discrepante", biw_birth))
+
+        match, motivo = _resolve(biw_birth, cands, scope)
+        if match is not None:
+            store.add_player(
+                store.new_player_canonical(),
+                [(BIWENGER, biw_id), (TRANSFERMARKT, match["id"])],
+                method="auto",
+                date=today,
+            )
+            approved.add(biw_id)
             continue
-        review_rows += _player_review_rows(
-            store, biw_id, player, canonical_team, cands, tm_all, taken, biw_birth
-        )
+        if not cands:
+            review_rows.append(_player_row(biw_id, player, None, motivo, biw_birth))
+            continue
+        review_rows += [_player_row(biw_id, player, c, motivo, biw_birth) for c in cands]
 
     store.players_review = _preserve_decisions(
         review_rows, old_review, approved, PLAYER_REVIEW_COLUMNS, ("biwenger_id", "tm_id")
@@ -505,25 +591,44 @@ def _map_players(
     return unapplied
 
 
-def _player_review_rows(
-    store: MappingStore,
-    biw_id: str,
-    player,
-    canonical_team: str | None,
-    in_club: list[dict],
-    tm_all: list[dict],
-    taken: set[str],
-    biw_birth: str,
-) -> list[dict]:
-    if len(in_club) > 1:
-        return [_player_row(biw_id, player, c, "varios-en-club", biw_birth) for c in in_club]
-    # Ningún candidato dentro del club: quizá esté cedido o el equipo no se mapeó.
-    # Ofrecemos como evidencia los homónimos en cualquier club (regla del dudoso).
-    motivo = "equipo-sin-mapear" if canonical_team is None else "fuera-de-club"
-    cross = [c for c in player_candidates(str(player.name), tm_all) if c["id"] not in taken]
-    if not cross:
-        return [_player_row(biw_id, player, None, "sin-candidato", biw_birth)]
-    return [_player_row(biw_id, player, c, motivo, biw_birth) for c in cross]
+def _resolve(biw_birth: str, cands: list[dict], scope: str) -> tuple[dict | None, str]:
+    """Decide si los candidatos identifican a una sola persona; si no, el motivo.
+
+    Cuánta evidencia exigimos depende de dónde salieron los candidatos: dentro de
+    un club ya mapeado el pool es de ~25 jugadores y un homónimo único basta
+    (la fecha solo descarta), pero en el pool global son miles y un apellido
+    suelto no identifica a nadie, así que ahí la fecha tiene que **confirmar**.
+    """
+    if not cands:
+        return None, "sin-candidato"
+
+    if scope == "club":
+        if len(cands) > 1:
+            return None, "varios-en-club"
+        only = cands[0]
+        if birthdate_compatible(biw_birth, only["birth_date"]):
+            return only, ""
+        # Homónimo único en el club pero con fecha discrepante: no se aprueba
+        # solo; va a revisión con ambas fechas como evidencia del desempate.
+        return None, "fecha-discrepante"
+
+    if scope == "club-fecha":
+        # Nacidos el mismo día dentro del mismo club: si es uno, es él.
+        return (cands[0], "") if len(cands) == 1 else (None, "varios-misma-fecha")
+
+    # scope global: el nombre solo propone; la fecha decide.
+    confirmed = [c for c in cands if birthdate_matches(biw_birth, c["birth_date"])]
+    if len(confirmed) == 1:
+        return confirmed[0], ""
+    if confirmed:
+        return None, "varios-misma-fecha"
+    if len(cands) > 1:
+        return None, "varios-candidatos"
+    if not biw_birth or not cands[0]["birth_date"]:
+        # Único homónimo en toda la historia de Transfermarkt, pero a alguna de las
+        # dos fuentes le falta la fecha: nada confirma que sea él.
+        return None, "sin-fecha-que-verificar"
+    return None, "fecha-discrepante"
 
 
 def _player_row(biw_id: str, player, cand: dict | None, motivo: str, biw_birth: str) -> dict:

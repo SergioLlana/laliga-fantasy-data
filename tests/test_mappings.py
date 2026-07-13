@@ -33,21 +33,30 @@ def seed(
     teams: list[dict],
     players: list[dict],
     tm_players: list[dict],
+    tm_past: list[dict] | None = None,
 ) -> None:
+    """Siembra las tablas curadas del caso.
+
+    ``tm_past`` puebla la plantilla de la temporada anterior: es donde vive la
+    contraparte de quien ya no juega en la liga pero cuya ficha Biwenger conserva.
+    """
     partition = {"competition": competition}
     storage.curated.write_table("biwenger_teams", pd.DataFrame(teams), partition=partition)
     players_df = pd.DataFrame(players, columns=["id", "name", "team_id", "birth_date"]).astype(
         {"team_id": "Int64"}
     )
     storage.curated.write_table("biwenger_players", players_df, partition=partition)
-    tm = pd.DataFrame(tm_players).astype({"club_id": "Int64"})
-    tm["birth_date"] = pd.to_datetime(tm["birth_date"])
     # transfermarkt_players es la plantilla *de una temporada* (ver ingest).
-    storage.curated.write_table(
-        "transfermarkt_players",
-        tm,
-        partition={"competition": competition, "season": str(season)},
-    )
+    for year, rows in ((season, tm_players), (season - 1, tm_past or [])):
+        if not rows:
+            continue
+        tm = pd.DataFrame(rows).astype({"club_id": "Int64"})
+        tm["birth_date"] = pd.to_datetime(tm["birth_date"])
+        storage.curated.write_table(
+            "transfermarkt_players",
+            tm,
+            partition={"competition": competition, "season": str(year)},
+        )
 
 
 # --- normalización -----------------------------------------------------------
@@ -228,6 +237,7 @@ def test_ambiguous_player_goes_to_review(storage: Storage, tmp_path: Path) -> No
 
 
 def test_loaned_player_offered_cross_club(storage: Storage, tmp_path: Path) -> None:
+    """Al cedido se le ofrece su homónimo de otro club, pero sin fecha no se aprueba."""
     seed(
         storage,
         teams=BASIC_TEAMS,
@@ -240,7 +250,160 @@ def test_loaned_player_offered_cross_club(storage: Storage, tmp_path: Path) -> N
     store.load()
     review = store.players_review
     assert review["tm_id"].tolist() == ["709380"]
-    assert review["motivo"].tolist() == ["fuera-de-club"]
+    assert review["motivo"].tolist() == ["sin-fecha-que-verificar"]
+
+
+def test_loaned_player_auto_matched_when_birthdate_confirms(
+    storage: Storage, tmp_path: Path
+) -> None:
+    """El club es una pista, no un filtro: con la fecha coincidente, es él aunque esté en otro."""
+    seed(
+        storage,
+        teams=BASIC_TEAMS,
+        players=[{"id": 100, "name": "Forés", "team_id": 1, "birth_date": "2001-04-12"}],
+        tm_players=BASIC_TM,  # Forés está en el Oviedo, no en el Athletic
+    )
+    report = run_map(storage, tmp_path / "mappings")
+
+    assert report.players_auto == 1
+    store = MappingStore(tmp_path / "mappings")
+    store.load()
+    assert store.approved_ids(store.players, "transfermarkt") == {"709380"}
+
+
+# --- el club como pista: apodos y fichas sin equipo ---------------------------
+
+
+def test_nickname_in_club_rescued_by_birthdate(storage: Storage, tmp_path: Path) -> None:
+    """'Ez Abde' no comparte ningún token con 'Abde Ezzalzouli': lo salva la fecha."""
+    seed(
+        storage,
+        teams=[{"id": 1, "name": "Betis"}],
+        players=[{"id": 100, "name": "Ez Abde", "team_id": 1, "birth_date": "2001-12-17"}],
+        tm_players=[
+            {
+                "id": 724520,
+                "name": "Abde Ezzalzouli",
+                "club_id": 1,
+                "club_name": "Real Betis",
+                "birth_date": "2001-12-17",
+                "position": "Left Winger",
+            },
+            {
+                "id": 461617,
+                "name": "Rodrigo Riquelme",
+                "club_id": 1,
+                "club_name": "Real Betis",
+                "birth_date": "2000-04-02",
+                "position": "Left Winger",
+            },
+        ],  # fmt: skip
+    )
+    report = run_map(storage, tmp_path / "mappings")
+
+    assert report.players_auto == 1
+    store = MappingStore(tmp_path / "mappings")
+    store.load()
+    assert store.approved_ids(store.players, "transfermarkt") == {"724520"}
+
+
+def test_player_without_team_found_in_past_season(storage: Storage, tmp_path: Path) -> None:
+    """Biwenger conserva la ficha del que ya no juega la liga: su contraparte está en el pasado."""
+    seed(
+        storage,
+        teams=BASIC_TEAMS,
+        # Sin team_id: ya no está en ninguna plantilla de Biwenger.
+        players=[{"id": 100, "name": "Griezmann", "team_id": None, "birth_date": "1991-03-21"}],
+        tm_players=BASIC_TM,  # no está en la plantilla de la temporada actual...
+        tm_past=[
+            {
+                "id": 125781,
+                "name": "Antoine Griezmann",
+                "club_id": 3,
+                "club_name": "Atlético de Madrid",
+                "birth_date": "1991-03-21",
+                "position": "Second Striker",
+            },
+        ],  # fmt: skip  ...pero sí en la anterior
+    )
+    report = run_map(storage, tmp_path / "mappings")
+
+    assert report.players_auto == 1
+    store = MappingStore(tmp_path / "mappings")
+    store.load()
+    assert store.approved_ids(store.players, "transfermarkt") == {"125781"}
+
+
+def test_confirmed_by_birthdate_stops_disputing(storage: Storage, tmp_path: Path) -> None:
+    """Una ficha huérfana de nombre genérico no puede bloquear a quien la fecha identifica.
+
+    'Thomas' (ficha vieja sin equipo) es compatible con todos los Thomas de
+    Transfermarkt, Lemar incluido. Pero Lemar nació el día exacto de Thomas Lemar:
+    la fecha lo confirma, así que deja de disputar y se aprueba. El genérico se
+    queda en revisión, que es donde debe estar.
+    """
+    seed(
+        storage,
+        teams=[{"id": 1, "name": "Atlético"}],
+        players=[
+            {"id": 100, "name": "Lemar", "team_id": 1, "birth_date": "1995-11-12"},
+            {"id": 200, "name": "Thomas", "team_id": None, "birth_date": None},
+        ],
+        tm_players=[
+            {
+                "id": 316,
+                "name": "Thomas Lemar",
+                "club_id": 1,
+                "club_name": "Atlético de Madrid",
+                "birth_date": "1995-11-12",
+                "position": "Left Winger",
+            },
+            {
+                "id": 148,
+                "name": "Thomas Partey",
+                "club_id": 1,
+                "club_name": "Atlético de Madrid",
+                "birth_date": "1993-06-13",
+                "position": "Defensive Midfield",
+            },
+        ],  # fmt: skip
+    )
+    report = run_map(storage, tmp_path / "mappings")
+
+    assert report.players_auto == 1
+    store = MappingStore(tmp_path / "mappings")
+    store.load()
+    assert store.canonical_by_source(store.players, "transfermarkt") == {
+        "316": store.canonical_by_source(store.players, "biwenger")["100"]
+    }
+    assert store.players_review["biwenger_id"].unique().tolist() == ["200"]
+
+
+def test_global_match_rejected_when_birthdate_differs(storage: Storage, tmp_path: Path) -> None:
+    """Fuera del club el pool son miles: un homónimo con otra fecha es otra persona."""
+    seed(
+        storage,
+        teams=BASIC_TEAMS,
+        # 'Luismi' de Biwenger (1992) no es 'Luismi Quirant' (2004): mismo apodo, otro jugador.
+        players=[{"id": 100, "name": "Luismi", "team_id": None, "birth_date": "1992-05-05"}],
+        tm_players=BASIC_TM,
+        tm_past=[
+            {
+                "id": 610461,
+                "name": "Luismi",
+                "club_id": 3,
+                "club_name": "Levante UD",
+                "birth_date": "2004-10-28",
+                "position": "Midfielder",
+            },
+        ],  # fmt: skip
+    )
+    report = run_map(storage, tmp_path / "mappings")
+
+    assert report.players_auto == 0
+    store = MappingStore(tmp_path / "mappings")
+    store.load()
+    assert store.players_review["motivo"].tolist() == ["fecha-discrepante"]
 
 
 def test_no_candidate_player(storage: Storage, tmp_path: Path) -> None:

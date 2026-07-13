@@ -16,7 +16,7 @@ from lfdata.sources.biwenger import (
     ingest_rounds,
     ingest_squad,
 )
-from lfdata.sources.biwenger.ingest import REFRESHED, SKIPPED
+from lfdata.sources.biwenger.ingest import COACH_POSITION, REFRESHED, SKIPPED
 from lfdata.sources.http import SourceHTTPError
 from lfdata.storage import Storage
 
@@ -37,11 +37,16 @@ class FakeTransport:
         return self.payload
 
 
-def _competition_payload(*slugs: str, rounds: list[tuple[int, str]] | None = None) -> bytes:
+def _competition_payload(
+    *slugs: str,
+    rounds: list[tuple[int, str]] | None = None,
+    coaches: list[str] | None = None,
+) -> bytes:
     """Plantilla mínima con los jugadores dados (solo lo que exige el modelo).
 
     ``rounds`` inyecta el catálogo ``season.rounds`` (pares id, estado) que el
-    refresh por deltas usa para detectar la jornada recién terminada.
+    refresh por deltas usa para detectar la jornada recién terminada. ``coaches``
+    añade entrenadores, que Biwenger publica en la misma lista que los jugadores.
     """
     players = {
         str(i): {
@@ -54,6 +59,18 @@ def _competition_payload(*slugs: str, rounds: list[tuple[int, str]] | None = Non
             "priceIncrement": 0,
         }
         for i, slug in enumerate(slugs, start=1)
+    }
+    players |= {
+        str(i): {
+            "id": i,
+            "name": slug,
+            "slug": slug,
+            "position": COACH_POSITION,
+            "status": "ok",
+            "price": 4420000,
+            "priceIncrement": 0,
+        }
+        for i, slug in enumerate(coaches or [], start=100)
     }
     season = {"id": "2026", "name": "2025/2026", "slug": "2025-2026"}
     if rounds is not None:
@@ -150,6 +167,17 @@ def test_ingest_squad_writes_curated_tables(storage: Storage, tmp_path: Path) ->
     teams = storage.curated.read_table("biwenger_teams")
     assert len(teams) == 4
     assert {"id", "slug", "name", "competition"} <= set(teams.columns)
+
+
+def test_ingest_squad_excludes_coaches(storage: Storage) -> None:
+    """Biwenger ficha a los entrenadores como si fueran jugadores; no lo son."""
+    payload = _competition_payload("williams", "fores", coaches=["flick", "simeone"])
+    result = ingest_squad(storage, "la-liga", transport=FakeTransport(payload))
+
+    assert result.rows["biwenger_players"] == 2
+    players = storage.curated.read_table("biwenger_players")
+    assert players["slug"].tolist() == ["williams", "fores"]
+    assert COACH_POSITION not in players["position"].tolist()
 
 
 def test_cli_ingest_end_to_end(tmp_path: Path, monkeypatch, capsys) -> None:

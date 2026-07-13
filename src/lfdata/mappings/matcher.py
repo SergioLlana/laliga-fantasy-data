@@ -22,6 +22,26 @@ def player_candidates(biwenger_name: str, tm_players: Iterable[dict]) -> list[di
     return [player for player in tm_players if name_compatible(biwenger_name, player["name"])]
 
 
+def birthdate_candidates(birth_date: str, tm_players: Iterable[dict]) -> list[dict]:
+    """Jugadores de Transfermarkt nacidos exactamente el mismo día.
+
+    El nombre falla donde el apodo no comparte tokens con el nombre de pila
+    (``Ez Abde`` / ``Abde Ezzalzouli``, ``Yusi`` / ``Youssef``): dentro de un club
+    ya mapeado, la coincidencia de fecha al día identifica al jugador aunque su
+    nombre no se parezca.
+    """
+    return [player for player in tm_players if birthdate_matches(birth_date, player["birth_date"])]
+
+
+def birthdate_matches(a: str, b: str) -> bool:
+    """¿Dos fechas de nacimiento ISO son la misma, y ambas existen?
+
+    Más estricta que :func:`birthdate_compatible`: aquí la fecha *confirma* una
+    identidad, así que una fecha ausente no confirma nada.
+    """
+    return bool(a) and bool(b) and a[:10] == b[:10]
+
+
 def birthdate_compatible(a: str, b: str) -> bool:
     """¿Dos fechas de nacimiento ISO son compatibles?
 
