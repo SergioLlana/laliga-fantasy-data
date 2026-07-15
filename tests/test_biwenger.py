@@ -872,6 +872,36 @@ def test_ingest_rounds_combines_five_systems(storage: Storage) -> None:
     assert home["result"] == "win"
 
 
+class NullSofascoreRoundsTransport(RoundsTransport):
+    """Como RoundsTransport pero el sistema 2 (SofaScore) puntúa `null` al local.
+
+    Reproduce el 2020/21: un jugador con puntos reales en los demás sistemas al
+    que SofaScore aún no cubría. La ingesta debe conservar su fila con la columna
+    de SofaScore nula, no romper la jornada entera.
+    """
+
+    def get(self, url, params=None) -> bytes:
+        payload = super().get(url, params=params)
+        if "/rounds/" in url and int(params["score"]) == 2:
+            data = json.loads(payload)
+            data["data"]["games"][0]["home"]["reports"][0]["points"] = None
+            return json.dumps(data).encode()
+        return payload
+
+
+def test_ingest_rounds_keeps_player_with_null_points_in_one_system(storage: Storage) -> None:
+    transport = NullSofascoreRoundsTransport(
+        _competition_payload("alex-fores"), PLAYER_LA_LIGA.read_bytes(), (4484,)
+    )
+    ingest_rounds(storage, "la-liga", "2025", transport=transport)
+
+    points = storage.curated.read_table("fantasy_round_points")
+    home = points[(points["player_id"] == 1) & (points["round_id"] == 4484)].iloc[0]
+    assert pd.isna(home["points_sofascore"])  # el sistema que llegó null
+    assert home["points_as"] == 1  # los demás, intactos
+    assert home["points_stats"] == 3
+
+
 def test_ingest_rounds_includes_departed_player(storage: Storage) -> None:
     """El jugador que ya no está en la plantilla actual sí aparece en la jornada."""
     transport = RoundsTransport(
