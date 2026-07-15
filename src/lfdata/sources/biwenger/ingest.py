@@ -506,6 +506,14 @@ _ROUND_POINTS_COLUMNS = [
     "result",
 ]
 
+# La jornada es la única vía que nombra a quien ya dejó la competición (su detalle
+# da 404), así que es también la única fuente de su identidad. Se guarda por
+# temporada —el club de aquel año es la pista de matching, ADR 0005— en tablas
+# espejo de biwenger_players/biwenger_teams, sin fecha de nacimiento (la jornada
+# no la trae): el matcher las suma a la plantilla actual para el histórico.
+_HISTORY_PLAYER_COLUMNS = ["id", "name", "slug", "position", "team_id"]
+_HISTORY_TEAM_COLUMNS = ["id", "name", "slug"]
+
 
 class RoundDiscoveryError(Exception):
     """No se pudo descubrir ninguna jornada de la temporada pedida.
@@ -542,7 +550,11 @@ def _discover_seed_round(
 
 
 def _accumulate_round(
-    rows: dict[tuple[int, int], dict], round_data: RoundData, column: str
+    rows: dict[tuple[int, int], dict],
+    identities: dict[int, dict],
+    teams: dict[int, dict],
+    round_data: RoundData,
+    column: str,
 ) -> None:
     """Vuelca en ``rows`` los puntos del sistema ``column`` de una jornada.
 
@@ -551,16 +563,32 @@ def _accumulate_round(
     filas, y esa columna queda nula sin perder a esos jugadores. La fila se crea
     la primera vez que un jugador-partido aparece, con sus datos de partido; las
     peticiones siguientes solo añaden su columna de puntos.
+
+    De paso reúne en ``identities`` y ``teams`` la identidad de cada jugador y
+    equipo vistos (nombre, slug, posición, club de la jornada): es lo único que
+    nombra a quien ya dejó la competición, y alimenta las tablas de histórico.
     """
     for game in round_data.games:
         for home, team in ((True, game.home), (False, game.away)):
             opponent = game.away if home else game.home
+            teams.setdefault(team.id, {"id": team.id, "name": team.name, "slug": team.slug})
             for report in team.reports:
-                key = (report.player.id, game.id)
+                player = report.player
+                identities.setdefault(
+                    player.id,
+                    {
+                        "id": player.id,
+                        "name": player.name,
+                        "slug": player.slug,
+                        "position": player.position,
+                        "team_id": team.id,
+                    },
+                )
+                key = (player.id, game.id)
                 row = rows.get(key)
                 if row is None:
                     row = {
-                        "player_id": report.player.id,
+                        "player_id": player.id,
                         "team_id": team.id,
                         "match_id": game.id,
                         "round_id": round_data.id,
@@ -590,6 +618,16 @@ def _round_points_frame(rows: list[dict]) -> pd.DataFrame:
     )
 
 
+def _history_players_frame(identities: list[dict]) -> pd.DataFrame:
+    return pd.DataFrame(identities, columns=_HISTORY_PLAYER_COLUMNS).astype(
+        {"position": "Int64", "team_id": "Int64"}
+    )
+
+
+def _history_teams_frame(teams: list[dict]) -> pd.DataFrame:
+    return pd.DataFrame(teams, columns=_HISTORY_TEAM_COLUMNS)
+
+
 def ingest_rounds(
     storage: Storage,
     competition: str,
@@ -606,7 +644,10 @@ def ingest_rounds(
     actual y leyendo el catálogo ``season.rounds`` de la respuesta de esa jornada.
     Para cada jornada hace cinco peticiones (una por sistema de puntuación) y
     vuelca una fila por jugador-partido con los cinco sistemas como columnas,
-    incluidos los jugadores que ya dejaron la competición.
+    incluidos los jugadores que ya dejaron la competición. De cada jornada guarda
+    además la identidad de jugadores y equipos vistos en ``biwenger_players_history``
+    y ``biwenger_teams_history`` (misma partición), única fuente del nombre de
+    quien ya se fue y que el matcher necesita para mapearlo.
 
     El upsert por ``round_id`` hace la ingesta idempotente: reprocesar una jornada
     reescribe sus filas sin duplicar. Con ``resume=True`` se saltan las jornadas
@@ -664,10 +705,28 @@ def ingest_rounds(
             )
             continue
         rows: dict[tuple[int, int], dict] = {}
+        identities: dict[int, dict] = {}
+        teams: dict[int, dict] = {}
         for system, column in POINT_SYSTEMS.items():
             round_data = client.fetch_round(competition, round_id, int(system)).data
             requests += 1
-            _accumulate_round(rows, round_data, column)
+            _accumulate_round(rows, identities, teams, round_data, column)
+        # La identidad se escribe antes que los puntos: si el run muere entre
+        # ambos upserts, la jornada no queda en fantasy_round_points y ``resume``
+        # la reprocesa, reescribiendo una identidad idéntica; al revés, dejaría
+        # puntos sin identidad que ``resume`` ya nunca volvería a pedir.
+        storage.curated.upsert_table(
+            "biwenger_players_history",
+            _history_players_frame(list(identities.values())),
+            key="id",
+            partition=partition,
+        )
+        storage.curated.upsert_table(
+            "biwenger_teams_history",
+            _history_teams_frame(list(teams.values())),
+            key="id",
+            partition=partition,
+        )
         storage.curated.upsert_table(
             "fantasy_round_points",
             _round_points_frame(list(rows.values())),

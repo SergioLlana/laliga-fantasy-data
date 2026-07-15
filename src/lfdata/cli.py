@@ -399,7 +399,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_SEASON,
         help=(
-            "Temporada de las plantillas de Transfermarkt en las que buscar la contraparte "
+            "Temporada de cuyas plantillas salen los clubes: las de Transfermarkt donde buscar "
+            "contraparte y el histórico de Biwenger (rounds) que entra en la pasada "
             f"(año de inicio; por defecto {DEFAULT_SEASON})"
         ),
     )
