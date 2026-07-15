@@ -164,7 +164,12 @@ class RoundReportPlayer(_BiwengerModel):
 
 class RoundReport(_BiwengerModel):
     player: RoundReportPlayer
-    points: int
+    # Un sistema puede puntuar `null` a un jugador que sí jugó: en 2020/21 el
+    # sistema 2 (SofaScore) llega null para quien sí tiene puntos en los demás,
+    # porque ese sistema no cubría toda la plantilla aún. La fila del jugador se
+    # conserva con esa columna nula (igual que en el detalle por jugador), en vez
+    # de romper la ingesta de la jornada entera.
+    points: int | None = None
 
 
 class RoundTeam(_BiwengerModel):
