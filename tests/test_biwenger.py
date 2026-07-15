@@ -915,6 +915,74 @@ def test_ingest_rounds_includes_departed_player(storage: Storage) -> None:
     assert baja["result"] == "loss"  # su equipo (visitante) perdió 2-0
 
 
+def test_ingest_rounds_writes_history_identity(storage: Storage) -> None:
+    """La jornada guarda la identidad de jugadores y equipos, incluida la baja."""
+    transport = RoundsTransport(
+        _competition_payload("alex-fores"), PLAYER_LA_LIGA.read_bytes(), (4484,)
+    )
+    ingest_rounds(storage, "la-liga", "2025", transport=transport)
+
+    players = storage.curated.read_table("biwenger_players_history")
+    assert set(players["id"]) == {1, DEPARTED_PLAYER_ID}
+    baja = players[players["id"] == DEPARTED_PLAYER_ID].iloc[0]
+    assert baja["name"] == "baja" and baja["slug"] == "baja"
+    assert baja["position"] == 3 and baja["team_id"] == 2  # club de la jornada
+
+    teams = storage.curated.read_table("biwenger_teams_history")
+    assert set(teams["id"]) == {1, 2}
+    assert set(teams["slug"]) == {"home", "away"}
+    # Particionadas por temporada, como transfermarkt_players.
+    assert set(players["season"]) == {"2025"} and set(teams["season"]) == {"2025"}
+
+
+def test_ingest_rounds_history_is_idempotent(storage: Storage) -> None:
+    def run() -> None:
+        ingest_rounds(
+            storage,
+            "la-liga",
+            "2025",
+            transport=RoundsTransport(
+                _competition_payload("alex-fores"), PLAYER_LA_LIGA.read_bytes(), (4484, 4485)
+            ),
+        )
+
+    run()
+    run()
+    players = storage.curated.read_table("biwenger_players_history")
+    assert len(players) == players["id"].nunique()  # sin duplicar por reejecución
+
+
+def test_ingest_rounds_writes_history_before_points(storage: Storage) -> None:
+    """Si el run muere tras la identidad y antes de los puntos, ``resume`` rehace.
+
+    El orden identidad→puntos garantiza que un corte nunca deja puntos sin la
+    identidad que el matcher necesita: la jornada sin fila en fantasy_round_points
+    se reprocesa entera al reanudar.
+    """
+    writes: list[str] = []
+    real_upsert = storage.curated.upsert_table
+
+    def spy(table, df, **kwargs):
+        writes.append(table)
+        if table == "fantasy_round_points":
+            raise RuntimeError("corte tras escribir la identidad")
+        return real_upsert(table, df, **kwargs)
+
+    storage.curated.upsert_table = spy  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="corte"):
+        ingest_rounds(
+            storage,
+            "la-liga",
+            "2025",
+            transport=RoundsTransport(
+                _competition_payload("alex-fores"), PLAYER_LA_LIGA.read_bytes(), (4484,)
+            ),
+        )
+    # La identidad se intentó escribir antes que los puntos.
+    assert writes.index("biwenger_players_history") < writes.index("fantasy_round_points")
+    assert "biwenger_players_history" in writes and "biwenger_teams_history" in writes
+
+
 def test_ingest_rounds_logs_request_count(storage: Storage, caplog) -> None:
     transport = RoundsTransport(
         _competition_payload("alex-fores"), PLAYER_LA_LIGA.read_bytes(), (4484, 4485)

@@ -422,6 +422,87 @@ def test_no_candidate_player(storage: Storage, tmp_path: Path) -> None:
     assert review["tm_id"].tolist() == [""]
 
 
+# --- histórico de rounds: identidad de quien ya dejó la competición ----------
+
+
+def seed_history(
+    storage: Storage, *, season: int, team: dict, player: dict, competition: str = "la-liga"
+) -> None:
+    """Siembra ``biwenger_*_history`` de una temporada, como haría ``ingest_rounds``."""
+    partition = {"competition": competition, "season": str(season)}
+    storage.curated.write_table("biwenger_teams_history", pd.DataFrame([team]), partition=partition)
+    players_df = pd.DataFrame(
+        [player], columns=["id", "name", "slug", "position", "team_id"]
+    ).astype({"position": "Int64", "team_id": "Int64"})
+    storage.curated.write_table("biwenger_players_history", players_df, partition=partition)
+
+
+def test_history_player_auto_mapped_in_its_season(storage: Storage, tmp_path: Path) -> None:
+    """El jugador de un club descendido, solo visto en rounds y sin fecha, se mapea.
+
+    No está en la plantilla actual (su club tampoco), así que sin las tablas de
+    histórico sería invisible al matcher. Con ellas, la pasada de su temporada lo
+    ve en su club de aquel año y lo auto-aprueba por homónimo único (ADR 0005).
+    """
+    past = DEFAULT_SEASON - 1
+    seed(
+        storage,
+        teams=[{"id": 1, "name": "Athletic"}],
+        players=[{"id": 1, "name": "Williams", "team_id": 1}],
+        tm_players=BASIC_TM[:1],
+        tm_past=[
+            {
+                "id": 55,
+                "name": "José Luis Morales",
+                "club_id": 3,
+                "club_name": "Levante UD",
+                "birth_date": "1987-07-23",
+                "position": "Left Winger",
+            },
+        ],  # fmt: skip
+    )
+    # Levante (id 3) no está en la plantilla actual: solo lo aporta el histórico.
+    seed_history(
+        storage,
+        season=past,
+        team={"id": 3, "name": "Levante", "slug": "levante"},
+        player={"id": 900, "name": "Morales", "slug": "morales", "position": 4, "team_id": 3},
+    )
+    report = run_map(storage, tmp_path / "mappings", season=past)
+
+    assert report.players_auto >= 1
+    store = MappingStore(tmp_path / "mappings")
+    store.load()
+    assert "55" in store.approved_ids(store.players, "transfermarkt")
+    morales = store.players[
+        (store.players["fuente"] == "biwenger") & (store.players["id_en_fuente"] == "900")
+    ].iloc[0]
+    assert morales["metodo"] == "auto"
+
+
+def test_history_of_other_seasons_absent_from_pass(storage: Storage, tmp_path: Path) -> None:
+    """En la pasada de una temporada, el histórico de otra no entra ni a revisión."""
+    other = DEFAULT_SEASON - 2
+    seed(
+        storage,
+        teams=[{"id": 1, "name": "Athletic"}],
+        players=[{"id": 1, "name": "Williams", "team_id": 1}],
+        tm_players=BASIC_TM[:1],
+    )
+    seed_history(
+        storage,
+        season=other,
+        team={"id": 3, "name": "Levante", "slug": "levante"},
+        player={"id": 900, "name": "Morales", "slug": "morales", "position": 4, "team_id": 3},
+    )
+    run_map(storage, tmp_path / "mappings", season=DEFAULT_SEASON)  # pasada de otra temporada
+
+    store = MappingStore(tmp_path / "mappings")
+    store.load()
+    assert "900" not in set(store.players_review["biwenger_id"])
+    assert "900" not in store.approved_ids(store.players, "biwenger")
+
+
 def test_team_without_candidate_goes_to_review(storage: Storage, tmp_path: Path) -> None:
     seed(
         storage,

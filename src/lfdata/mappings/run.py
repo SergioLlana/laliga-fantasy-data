@@ -270,6 +270,23 @@ def _read_curated(storage: Storage, table: str, columns: list[str]) -> pd.DataFr
     return df[columns]
 
 
+def _with_history(current: pd.DataFrame, history: pd.DataFrame, season: int) -> pd.DataFrame:
+    """Suma a la plantilla actual los jugadores/equipos que solo vio ``rounds``.
+
+    ``rounds`` observa a quien ya dejó la competición; su identidad se guarda por
+    temporada en las tablas ``*_history``. En una pasada de ``season`` se añaden
+    los de esa temporada que no están ya en la plantilla actual —esta gana: trae
+    fecha de nacimiento y es más fresca—, de modo que el matcher los vea con el
+    club de aquel año como pista (el único desempate sin fecha, ADR 0005). El
+    histórico de otras temporadas no entra: se mapea en su propia pasada.
+    """
+    if history.empty:
+        return current
+    extra = history[history["season"].astype(str) == str(season)]
+    extra = extra[~extra["id"].isin(set(current["id"]))]
+    return pd.concat([current, extra[current.columns]], ignore_index=True)
+
+
 def run_map(
     storage: Storage,
     mappings_dir,
@@ -288,10 +305,22 @@ def run_map(
     tendría contraparte posible, cuando sí la tiene en la temporada en que jugó.
     """
     today = today or _today()
-    biw_players = _read_curated(
-        storage, "biwenger_players", ["id", "name", "team_id", "birth_date", "competition"]
+    biw_players = _with_history(
+        _read_curated(
+            storage, "biwenger_players", ["id", "name", "team_id", "birth_date", "competition"]
+        ),
+        _read_curated(
+            storage,
+            "biwenger_players_history",
+            ["id", "name", "team_id", "birth_date", "competition", "season"],
+        ),
+        season,
     )
-    biw_teams = _read_curated(storage, "biwenger_teams", ["id", "name", "competition"])
+    biw_teams = _with_history(
+        _read_curated(storage, "biwenger_teams", ["id", "name", "competition"]),
+        _read_curated(storage, "biwenger_teams_history", ["id", "name", "competition", "season"]),
+        season,
+    )
     tm_all = _read_curated(
         storage,
         "transfermarkt_players",
