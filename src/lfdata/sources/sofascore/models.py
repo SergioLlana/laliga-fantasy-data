@@ -167,6 +167,16 @@ class EventStatus(_SofaModel):
     type: str | None = None
 
 
+class EventTournamentRef(_SofaModel):
+    """El ``tournament`` del evento, del que cuelga el ``uniqueTournament``.
+
+    El id de competición que usa el proyecto (8 = LaLiga) es el del
+    ``uniqueTournament`` anidado, no el del ``tournament`` (que es por país).
+    """
+
+    unique_tournament: UniqueTournament | None = Field(alias="uniqueTournament", default=None)
+
+
 class CalendarEvent(_SofaModel):
     id: int
     start_timestamp: int | None = Field(alias="startTimestamp", default=None)
@@ -174,10 +184,20 @@ class CalendarEvent(_SofaModel):
     home_team: EventTeam = Field(alias="homeTeam")
     away_team: EventTeam = Field(alias="awayTeam")
     has_event_player_statistics: bool | None = Field(alias="hasEventPlayerStatistics", default=None)
+    # Competición y temporada del partido: solo se leen al construir el catálogo
+    # ``sofascore_players``/``sofascore_teams`` desde raw/ (el backfill no los usa).
+    tournament: EventTournamentRef | None = None
+    season: SeasonRef | None = None
 
     @property
     def finished(self) -> bool:
         return self.status.type == "finished"
+
+    @property
+    def unique_tournament_id(self) -> int | None:
+        if self.tournament is None or self.tournament.unique_tournament is None:
+            return None
+        return self.tournament.unique_tournament.id
 
 
 class EventsResponse(_SofaModel):
@@ -197,6 +217,9 @@ class LineupPlayerRef(_SofaModel):
     id: int | None = None
     name: str | None = None
     slug: str | None = None
+    # La fecha de nacimiento (epoch UTC) solo viene completa aquí, no en search/all:
+    # es la evidencia que sostiene el matcher de identidad de SofaScore (ADR 0001).
+    date_of_birth_timestamp: int | None = Field(alias="dateOfBirthTimestamp", default=None)
 
 
 class LineupPlayer(_SofaModel):

@@ -349,9 +349,9 @@ def _download_history(
     """Descarga de SofaScore el historial del fichaje; devuelve el estado.
 
     Se pide por su ID de SofaScore si la identidad ya lo tiene mapeado (llegó a la
-    plataforma por otra vía) y, si no, por nombre: es el caso normal de un fichaje,
-    y ``ingest_player`` lo encola entonces en ``sofascore-review.csv`` para la
-    ronda de matching.
+    plataforma por otra vía) y, si no, por nombre: es el caso normal de un fichaje.
+    Su ``canonical_id`` lo resuelve luego ``lfdata map`` desde el catálogo
+    ``sofascore_players`` y un re-estampado con ``lfdata curate sofascore-canonical``.
 
     Que SofaScore no encuentre al jugador (un juvenil sin ficha) no es un fallo del
     run: se registra como anomalía, el fichaje queda en ``sin-historial`` —lo que

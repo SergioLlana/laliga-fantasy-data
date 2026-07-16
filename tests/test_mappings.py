@@ -828,7 +828,208 @@ def test_manual_decision_rejects_taken_tm_id(storage: Storage, tmp_path: Path) -
     assert len(tm10) == 1
 
 
+# --- SofaScore: se cuelga del canónico que Biwenger ya tiene -----------------
+
+
+def seed_sofascore(
+    storage: Storage,
+    *,
+    competition: str = "la-liga",
+    season: int = DEFAULT_SEASON,
+    teams: list[dict],
+    players: list[dict],
+) -> None:
+    """Siembra el catálogo ``sofascore_teams``/``sofascore_players`` de un caso.
+
+    La competición y la temporada van en la partición (como en el catálogo real,
+    slug del proyecto y año de inicio), no en las filas.
+    """
+    partition = {"competition": competition, "season": str(season)}
+    storage.curated.write_table(
+        "sofascore_teams",
+        pd.DataFrame(teams, columns=["team_id", "team_name"]).astype({"team_id": "Int64"}),
+        partition=partition,
+    )
+    storage.curated.write_table(
+        "sofascore_players",
+        pd.DataFrame(
+            players,
+            columns=["sofascore_player_id", "name", "birth_date", "team_id", "team_name"],
+        ).astype({"sofascore_player_id": "Int64", "team_id": "Int64"}),
+        partition=partition,
+    )
+
+
+ATHLETIC_SO_TEAM = [{"team_id": 900, "team_name": "Athletic Bilbao"}]
+
+
+def test_sofascore_auto_attaches_to_existing_canonical(storage: Storage, tmp_path: Path) -> None:
+    """Un par biunívoco cuelga el id de SofaScore del canónico que Biwenger ya tiene."""
+    seed(
+        storage,
+        teams=BASIC_TEAMS,
+        players=[{"id": 100, "name": "Williams", "team_id": 1, "birth_date": "1994-06-15"}],
+        tm_players=BASIC_TM,
+    )
+    seed_sofascore(
+        storage,
+        teams=ATHLETIC_SO_TEAM,
+        players=[
+            {
+                "sofascore_player_id": 5000,
+                "name": "Iñaki Williams",
+                "birth_date": "1994-06-15",
+                "team_id": 900,
+                "team_name": "Athletic Bilbao",
+            }
+        ],
+    )
+    report = run_map(storage, tmp_path / "mappings")
+
+    store = MappingStore(tmp_path / "mappings")
+    store.load()
+    canonical = store.canonical_by_source(store.players, "biwenger")["100"]
+    sofascore = store.players[store.players["fuente"] == "sofascore"].iloc[0]
+    assert sofascore["id_en_fuente"] == "5000"
+    assert sofascore["canonical_id"] == canonical  # el mismo de Biwenger↔Transfermarkt
+    assert sofascore["metodo"] == "auto"
+    # El equipo también cuelga del canónico del equipo de Biwenger.
+    assert "900" in store.approved_ids(store.teams, "sofascore")
+    assert report.sofascore_players_mapped == 1
+    assert report.sofascore_teams_mapped == 1
+    assert report.sofascore_unresolved == 0
+
+
+def test_sofascore_discrepant_birthdate_not_auto_even_if_only_homonym(
+    storage: Storage, tmp_path: Path
+) -> None:
+    """Fecha discrepante: no se auto-aprueba aunque sea el único homónimo del club."""
+    seed(
+        storage,
+        teams=BASIC_TEAMS,
+        players=[{"id": 100, "name": "Williams", "team_id": 1, "birth_date": "1994-06-15"}],
+        tm_players=BASIC_TM,
+    )
+    seed_sofascore(
+        storage,
+        teams=ATHLETIC_SO_TEAM,
+        players=[
+            {
+                "sofascore_player_id": 5000,
+                "name": "Iñaki Williams",
+                "birth_date": "1990-01-01",  # discrepa con Biwenger (1994-06-15)
+                "team_id": 900,
+                "team_name": "Athletic Bilbao",
+            }
+        ],
+    )
+    run_map(storage, tmp_path / "mappings")
+
+    store = MappingStore(tmp_path / "mappings")
+    store.load()
+    assert store.players[store.players["fuente"] == "sofascore"].empty  # nada auto-aprobado
+    review = store.players_review_sofascore
+    assert review["motivo"].tolist() == ["fecha-discrepante"]
+    assert review["sofascore_id"].tolist() == ["5000"]
+    # Ambas fechas quedan como evidencia del desempate manual.
+    assert review["biwenger_birth_date"].tolist() == ["1994-06-15"]
+    assert review["sofascore_birth_date"].tolist() == ["1990-01-01"]
+    assert (review["decision"] == "").all()
+
+
+def test_sofascore_manual_decision_attaches_and_survives_regeneration(
+    storage: Storage, tmp_path: Path
+) -> None:
+    seed(
+        storage,
+        teams=BASIC_TEAMS,
+        players=[{"id": 100, "name": "Williams", "team_id": 1, "birth_date": "1994-06-15"}],
+        tm_players=BASIC_TM,
+    )
+    seed_sofascore(
+        storage,
+        teams=ATHLETIC_SO_TEAM,
+        players=[
+            {
+                "sofascore_player_id": 5000,
+                "name": "Iñaki Williams",
+                "birth_date": "1990-01-01",
+                "team_id": 900,
+                "team_name": "Athletic Bilbao",
+            }
+        ],
+    )
+    mappings = tmp_path / "mappings"
+    run_map(storage, mappings)
+
+    # Un humano confirma en la revisión que el candidato de SofaScore es el correcto.
+    review = pd.read_csv(mappings / "sofascore-review.csv", dtype=str, keep_default_na=False)
+    review.loc[review["sofascore_id"] == "5000", "decision"] = "y"
+    review.to_csv(mappings / "sofascore-review.csv", index=False)
+
+    report = run_map(storage, mappings)
+
+    store = MappingStore(mappings)
+    store.load()
+    sofascore = store.players[store.players["fuente"] == "sofascore"].iloc[0]
+    assert sofascore["id_en_fuente"] == "5000"
+    assert sofascore["metodo"] == "manual"
+    assert report.sofascore_players_review == 0
+
+
+def test_sofascore_waits_for_biwenger_canonical(storage: Storage, tmp_path: Path) -> None:
+    """Sin canónico en Biwenger (su Transfermarkt sigue en duda) no hay de qué colgar."""
+    seed(
+        storage,
+        teams=[{"id": 1, "name": "Athletic"}],
+        players=[{"id": 100, "name": "Williams", "team_id": 1}],
+        tm_players=TWO_WILLIAMS_TM,  # dos homónimos: Biwenger 100 queda sin canónico
+    )
+    seed_sofascore(
+        storage,
+        teams=ATHLETIC_SO_TEAM,
+        players=[
+            {
+                "sofascore_player_id": 5000,
+                "name": "Iñaki Williams",
+                "birth_date": "1994-06-15",
+                "team_id": 900,
+                "team_name": "Athletic Bilbao",
+            }
+        ],
+    )
+    report = run_map(storage, tmp_path / "mappings")
+
+    store = MappingStore(tmp_path / "mappings")
+    store.load()
+    assert store.players[store.players["fuente"] == "sofascore"].empty
+    assert report.sofascore_unresolved == 1  # el id 5000 sigue sin resolver
+
+
 # --- verificación (--check) --------------------------------------------------
+
+
+def test_check_fails_on_unmapped_sofascore_id_in_curated(storage: Storage, tmp_path: Path) -> None:
+    seed(
+        storage,
+        teams=BASIC_TEAMS,
+        players=[
+            {"id": 100, "name": "Williams", "team_id": 1},
+            {"id": 200, "name": "Forés", "team_id": 2},
+        ],
+        tm_players=BASIC_TM,
+    )
+    mappings = tmp_path / "mappings"
+    run_map(storage, mappings)  # Biwenger y Transfermarkt quedan mapeados
+
+    # Eventing curado con un id de SofaScore que no tiene canónico aprobado.
+    storage.curated.write_table(
+        "player_match_stats",
+        pd.DataFrame([{"canonical_id": "", "sofascore_player_id": 9999, "date": "2025-05-10"}]),
+        partition={"competition": "8", "season": "77559"},
+    )
+    problems = check_mappings(storage, mappings)
+    assert any("9999" in p for p in problems)
 
 
 def test_check_passes_without_curated_data(storage: Storage, tmp_path: Path) -> None:

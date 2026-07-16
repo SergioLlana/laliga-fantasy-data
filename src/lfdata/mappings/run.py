@@ -43,6 +43,9 @@ from lfdata.mappings.matcher import (
 from lfdata.mappings.store import (
     BIWENGER,
     PLAYER_REVIEW_COLUMNS,
+    SOFASCORE,
+    SOFASCORE_PLAYER_REVIEW_COLUMNS,
+    SOFASCORE_TEAM_REVIEW_COLUMNS,
     TEAM_REVIEW_COLUMNS,
     TRANSFERMARKT,
     MappingStore,
@@ -88,6 +91,13 @@ class MapReport:
     players_auto: int = 0
     players_manual: int = 0
     players_review: int = 0
+    # SofaScore (se cuelga del canónico de Biwenger, no crea identidades).
+    sofascore_present: bool = False
+    sofascore_teams_mapped: int = 0
+    sofascore_teams_review: int = 0
+    sofascore_players_mapped: int = 0
+    sofascore_players_review: int = 0
+    sofascore_unresolved: int = 0
     unapplied: list[UnappliedDecision] = field(default_factory=list)
 
     @property
@@ -111,6 +121,13 @@ class MapReport:
             f"{self.players_auto} auto, {self.players_manual} manual, "
             f"{self.players_review} en revisión, {self.players_pending} pendientes",
         ]
+        if self.sofascore_present:
+            lines.append(
+                f"SofaScore: {self.sofascore_teams_mapped} equipos y "
+                f"{self.sofascore_players_mapped} jugadores colgados del canónico "
+                f"({self.sofascore_teams_review + self.sofascore_players_review} en revisión) — "
+                f"{self.sofascore_unresolved} IDs de SofaScore sin resolver"
+            )
         if self.unapplied:
             lines.append("")
             lines.append(
@@ -328,14 +345,39 @@ def run_map(
     )
     tm_season = tm_all[tm_all["season"].astype(str) == str(season)]
 
+    so_teams_all = _read_curated(
+        storage, "sofascore_teams", ["team_id", "team_name", "competition", "season"]
+    )
+    so_players_all = _read_curated(
+        storage,
+        "sofascore_players",
+        [
+            "sofascore_player_id",
+            "name",
+            "birth_date",
+            "team_id",
+            "team_name",
+            "competition",
+            "season",
+        ],
+    )
+    so_teams_season = so_teams_all[so_teams_all["season"].astype(str) == str(season)]
+    so_players_season = so_players_all[so_players_all["season"].astype(str) == str(season)]
+
     store = MappingStore(mappings_dir)
     store.load()
 
     unapplied = _map_teams(store, biw_teams, tm_season, today)
     unapplied += _map_players(store, biw_players, tm_season, tm_all, today)
+    # SofaScore va después: se cuelga del canónico que Biwenger ya obtuvo de
+    # Transfermarkt (equipos primero, luego jugadores dentro del club canónico).
+    unapplied += _map_teams_sofascore(store, biw_teams, so_teams_season, today)
+    unapplied += _map_players_sofascore(
+        store, biw_players, so_players_season, so_players_all, today
+    )
 
     store.save()
-    report = _report(store, biw_teams, biw_players)
+    report = _report(store, biw_teams, biw_players, so_players_all)
     report.unapplied = unapplied
     return report
 
@@ -343,14 +385,19 @@ def run_map(
 # --- equipos -----------------------------------------------------------------
 
 
-def _tm_clubs(tm_players: pd.DataFrame) -> list[dict]:
-    if tm_players.empty:
+def _clubs(players: pd.DataFrame, *, id_col: str, name_col: str) -> list[dict]:
+    """Clubes de una fuente por competición, deduplicados por su id.
+
+    Neutral a la fuente: Transfermarkt pasa ``club_id``/``club_name`` y SofaScore
+    ``team_id``/``team_name``; ambos alimentan el mismo grafo de equipos.
+    """
+    if players.empty:
         return []
-    clubs = tm_players.dropna(subset=["club_id"]).drop_duplicates(subset=["club_id"])
+    clubs = players.dropna(subset=[id_col]).drop_duplicates(subset=[id_col])
     return [
         {
-            "club_id": str(int(row.club_id)),
-            "club_name": str(row.club_name),
+            "club_id": str(int(getattr(row, id_col))),
+            "club_name": str(getattr(row, name_col)),
             "competition": str(row.competition),
         }
         for row in clubs.itertuples()
@@ -360,7 +407,7 @@ def _tm_clubs(tm_players: pd.DataFrame) -> list[dict]:
 def _map_teams(
     store: MappingStore, biw_teams: pd.DataFrame, tm_players: pd.DataFrame, today: str
 ) -> list[UnappliedDecision]:
-    clubs = _tm_clubs(tm_players)
+    clubs = _clubs(tm_players, id_col="club_id", name_col="club_name")
     approved = store.approved_ids(store.teams, BIWENGER)
     taken = store.approved_ids(store.teams, TRANSFERMARKT)
     old_review = store.teams_review
@@ -448,30 +495,42 @@ def _team_review_rows(
 # --- jugadores ---------------------------------------------------------------
 
 
-def _tm_record(row) -> dict:
+def _source_record(row, *, id_col: str, club_col: str, position_col: str | None = None) -> dict:
+    """Registro neutral de un jugador de una fuente para el matcher.
+
+    Todas las fuentes se proyectan a la misma forma (``id``/``name``/``club_name``/
+    ``birth_date``/``position``/``season``) para que ``_candidates``/``_resolve`` no
+    distingan de dónde vienen. SofaScore no publica posición aquí (``position_col``
+    None → cadena vacía).
+    """
+    position = getattr(row, position_col) if position_col else None
     return {
-        "id": str(int(row.id)),
+        "id": str(int(getattr(row, id_col))),
         "name": str(row.name),
-        "club_name": "" if pd.isna(row.club_name) else str(row.club_name),
+        "club_name": "" if pd.isna(getattr(row, club_col)) else str(getattr(row, club_col)),
         "birth_date": "" if pd.isna(row.birth_date) else str(row.birth_date)[:10],
-        "position": "" if pd.isna(row.position) else str(row.position),
+        "position": "" if position is None or pd.isna(position) else str(position),
         "season": "" if pd.isna(row.season) else str(row.season),
     }
 
 
-def _global_pool(tm_all: pd.DataFrame) -> list[dict]:
-    """Un registro por jugador de Transfermarkt, con su club más reciente.
+def _tm_record(row) -> dict:
+    return _source_record(row, id_col="id", club_col="club_name", position_col="position")
+
+
+def _global_pool(players: pd.DataFrame, *, id_col: str, record) -> list[dict]:
+    """Un registro por jugador de la fuente, con su club más reciente.
 
     El mismo jugador aparece en una fila por temporada en la que estuvo en una
     plantilla; para el matching solo importa su identidad, así que nos quedamos
     con la fila de la temporada más alta (el club que mostramos al revisor es
     entonces el último que se le conoce).
     """
-    rows = tm_all.dropna(subset=["id"])
+    rows = players.dropna(subset=[id_col])
     if rows.empty:
         return []
-    latest = rows.sort_values("season").drop_duplicates(subset=["id"], keep="last")
-    return [_tm_record(row) for row in latest.itertuples()]
+    latest = rows.sort_values("season").drop_duplicates(subset=[id_col], keep="last")
+    return [record(row) for row in latest.itertuples()]
 
 
 def _candidates(
@@ -497,7 +556,22 @@ def _candidates(
     return player_candidates(name, pool), "global"
 
 
-def _reserved_by_birthdate(proposals: list[tuple]) -> dict[str, str]:
+@dataclass
+class _Proposal:
+    """Un jugador de Biwenger y sus candidatos de la fuente, antes de resolver."""
+
+    left_id: str
+    birth_date: str
+    cands: list[dict]
+    scope: str
+
+    @property
+    def confirmed(self) -> list[dict]:
+        """Candidatos que la fecha de nacimiento confirma (derivado de ``cands``)."""
+        return [c for c in self.cands if birthdate_matches(self.birth_date, c["birth_date"])]
+
+
+def _reserved_by_birthdate(proposals: list[tuple[str, list[dict]]]) -> dict[str, str]:
     """Candidatos que la fecha de nacimiento adjudica a un único jugador de Biwenger.
 
     Quien tiene su identidad probada por la fecha se lleva a su candidato, y los
@@ -507,12 +581,56 @@ def _reserved_by_birthdate(proposals: list[tuple]) -> dict[str, str]:
     el día exacto de Thomas Lemar, pero ``Thomas`` le disputaba el candidato y
     ninguno de los dos se aprobaba. Un candidato confirmado por dos no lo adjudica
     nadie: esa disputa es real y va a revisión.
+
+    ``proposals`` es una lista de ``(left_id, confirmed)`` para ser neutral a la
+    fuente: lo comparten las pasadas de Transfermarkt y de SofaScore.
     """
     claims: dict[str, set[str]] = defaultdict(set)
-    for biw_id, _, _, _, _, confirmed in proposals:
+    for left_id, confirmed in proposals:
         if len(confirmed) == 1:
-            claims[confirmed[0]["id"]].add(biw_id)
-    return {tm_id: next(iter(owners)) for tm_id, owners in claims.items() if len(owners) == 1}
+            claims[confirmed[0]["id"]].add(left_id)
+    return {
+        source_id: next(iter(owners)) for source_id, owners in claims.items() if len(owners) == 1
+    }
+
+
+def _resolve_graph(
+    proposals: list[_Proposal],
+) -> list[tuple[_Proposal, dict | None, list[dict], str]]:
+    """Resuelve el grafo bipartito Biwenger↔fuente sobre un scope fijo (issue #40).
+
+    Motor neutral a la fuente. Devuelve, por propuesta, una tupla
+    ``(proposal, match, cands, motivo)``: si ``match`` no es ``None`` el par es
+    biunívoco y se auto-aprueba con ese candidato; si es ``None`` va a revisión con
+    ``cands`` (posiblemente vacío) y el ``motivo``. Calcula todas las
+    compatibilidades antes de decidir, de modo que dos jugadores de Biwenger que se
+    disputen el mismo candidato vayan ambos a revisión sin que el orden decida.
+    """
+    reserved = _reserved_by_birthdate([(p.left_id, p.confirmed) for p in proposals])
+    trimmed: list[tuple[_Proposal, list[dict]]] = []
+    suitors: dict[str, set[str]] = defaultdict(set)
+    for p in proposals:
+        if len(p.confirmed) == 1 and reserved.get(p.confirmed[0]["id"]) == p.left_id:
+            cands = p.confirmed
+        else:
+            cands = [c for c in p.cands if reserved.get(c["id"], p.left_id) == p.left_id]
+        trimmed.append((p, cands))
+        for c in cands:
+            suitors[c["id"]].add(p.left_id)
+
+    resolved: list[tuple[_Proposal, dict | None, list[dict], str]] = []
+    for p, cands in trimmed:
+        if any(len(suitors[c["id"]]) > 1 for c in cands):
+            # Algún candidato lo reclama también otro jugador de Biwenger: nadie se
+            # auto-aprueba; todos a revisión con el cuadro completo.
+            resolved.append((p, None, cands, "candidato-compartido"))
+            continue
+        match, motivo = _resolve(p.birth_date, cands, p.scope)
+        if match is not None:
+            resolved.append((p, match, [match], ""))
+        else:
+            resolved.append((p, None, cands, motivo))
+    return resolved
 
 
 def _map_players(
@@ -534,7 +652,7 @@ def _map_players(
             canonical = tm_club_to_canonical.get(str(int(row.club_id)))
             if canonical:
                 tm_by_canonical[canonical].append(_tm_record(row))
-    pool = _global_pool(tm_all)
+    pool = _global_pool(tm_all, id_col="id", record=_tm_record)
 
     approved = store.approved_ids(store.players, BIWENGER)
     taken = store.approved_ids(store.players, TRANSFERMARKT)
@@ -551,12 +669,12 @@ def _map_players(
         today=today,
     )
 
-    # Grafo bipartito sobre un scope fijo (los no tomados). Se calcula primero
-    # para todos y solo después se auto-aprueba, de modo que dos jugadores de
-    # Biwenger que se disputen el mismo candidato de Transfermarkt vayan ambos a
-    # revisión, sin que el orden de los ids decida por nosotros.
+    # Grafo bipartito sobre un scope fijo (los no tomados), resuelto por el motor
+    # neutral: se calcula todo antes de aprobar para que el resultado no dependa
+    # del orden de los ids.
     free_pool = [c for c in pool if c["id"] not in taken]
-    proposals: list[tuple[str, object, str, list[dict], str, list[dict]]] = []
+    proposals: list[_Proposal] = []
+    players_by_id: dict[str, object] = {}
     for player in biw_players.sort_values(["competition", "id"]).itertuples():
         biw_id = str(int(player.id))
         if biw_id in approved:
@@ -573,33 +691,13 @@ def _map_players(
             if c["id"] not in taken
         ]
         cands, scope = _candidates(str(player.name), biw_birth, in_club, free_pool)
-        confirmed = [c for c in cands if birthdate_matches(biw_birth, c["birth_date"])]
-        proposals.append((biw_id, player, biw_birth, cands, scope, confirmed))
-
-    reserved = _reserved_by_birthdate(proposals)
-
-    pending: list[tuple[str, object, str, list[dict], str]] = []
-    tm_suitors: dict[str, set[str]] = defaultdict(set)
-    for biw_id, player, biw_birth, cands, scope, confirmed in proposals:
-        if len(confirmed) == 1 and reserved.get(confirmed[0]["id"]) == biw_id:
-            cands = confirmed
-        else:
-            cands = [c for c in cands if reserved.get(c["id"], biw_id) == biw_id]
-        pending.append((biw_id, player, biw_birth, cands, scope))
-        for c in cands:
-            tm_suitors[c["id"]].add(biw_id)
+        proposals.append(_Proposal(biw_id, biw_birth, cands, scope))
+        players_by_id[biw_id] = player
 
     review_rows: list[dict] = []
-    for biw_id, player, biw_birth, cands, scope in pending:
-        if any(len(tm_suitors[c["id"]]) > 1 for c in cands):
-            # Algún candidato lo reclama también otro jugador de Biwenger: nadie
-            # se auto-aprueba; todos a revisión con el cuadro completo.
-            review_rows += [
-                _player_row(biw_id, player, c, "candidato-compartido", biw_birth) for c in cands
-            ]
-            continue
-
-        match, motivo = _resolve(biw_birth, cands, scope)
+    for proposal, match, cands, motivo in _resolve_graph(proposals):
+        biw_id, biw_birth = proposal.left_id, proposal.birth_date
+        player = players_by_id[biw_id]
         if match is not None:
             store.add_player(
                 store.new_player_canonical(),
@@ -676,15 +774,288 @@ def _player_row(biw_id: str, player, cand: dict | None, motivo: str, biw_birth: 
     }
 
 
+# --- SofaScore: se cuelga del canónico que Biwenger ya tiene ------------------
+#
+# Misma regla biunívoca y misma graduación por fecha que Transfermarkt, con una
+# diferencia clave: SofaScore no crea identidades. Cuando un par es seguro, el id
+# de SofaScore se añade al ``canonical_id`` que Biwenger ya obtuvo en la pasada de
+# Transfermarkt; si Biwenger aún no tiene canónico (su Transfermarkt sigue en
+# revisión), no hay a qué colgarlo y se deja pendiente para una pasada posterior.
+
+
+def _so_record(row) -> dict:
+    """Registro neutral de un jugador de SofaScore (``club_name`` = nombre del equipo)."""
+    return _source_record(row, id_col="sofascore_player_id", club_col="team_name")
+
+
+def _biwenger_ids_with_source(df: pd.DataFrame, source: str) -> set[str]:
+    """Ids de Biwenger cuyo canónico ya tiene un mapping a ``source``.
+
+    ``df`` es ``store.players`` o ``store.teams``: la misma consulta sirve a ambos.
+    """
+    with_source = set(df.loc[df["fuente"] == source, "canonical_id"])
+    biw = df[df["fuente"] == BIWENGER]
+    return set(biw.loc[biw["canonical_id"].isin(with_source), "id_en_fuente"])
+
+
+def _map_teams_sofascore(
+    store: MappingStore, biw_teams: pd.DataFrame, so_teams: pd.DataFrame, today: str
+) -> list[UnappliedDecision]:
+    """Cuelga cada equipo de SofaScore del canónico del equipo de Biwenger."""
+    clubs = _clubs(so_teams, id_col="team_id", name_col="team_name")
+    biw_canonical = store.canonical_by_source(store.teams, BIWENGER)
+    resolved = _biwenger_ids_with_source(store.teams, SOFASCORE)
+    taken = store.approved_ids(store.teams, SOFASCORE)
+    old_review = store.teams_review_sofascore
+
+    unapplied = _apply_source_decisions(
+        old_review,
+        resolved,
+        taken,
+        biw_canonical,
+        store.add_team,
+        "equipo",
+        "sofascore_team_id",
+        today,
+    )
+
+    pending: list[tuple[str, object, str, list[dict]]] = []
+    club_suitors: dict[str, set[str]] = defaultdict(set)
+    for team in biw_teams.sort_values(["competition", "id"]).itertuples():
+        biw_id = str(int(team.id))
+        if biw_id in resolved or biw_id not in biw_canonical:
+            continue
+        competition = str(team.competition)
+        scope = [c for c in clubs if c["competition"] == competition and c["club_id"] not in taken]
+        cands = team_candidates(str(team.name), scope)
+        pending.append((biw_id, team, competition, cands))
+        for club in cands:
+            club_suitors[club["club_id"]].add(biw_id)
+
+    review_rows: list[dict] = []
+    for biw_id, team, competition, cands in pending:
+        if len(cands) == 1 and len(club_suitors[cands[0]["club_id"]]) == 1:
+            store.add_team(
+                biw_canonical[biw_id], [(SOFASCORE, cands[0]["club_id"])], method="auto", date=today
+            )
+            resolved.add(biw_id)
+        elif cands:
+            # Sin candidatos no hay dudoso: SofaScore solo cubre lo backfilleado, así
+            # que la ausencia es lo esperado y el equipo queda pendiente, no en revisión.
+            review_rows += _so_team_review_rows(biw_id, team, competition, cands, club_suitors)
+
+    store.teams_review_sofascore = _preserve_decisions(
+        review_rows,
+        old_review,
+        resolved,
+        SOFASCORE_TEAM_REVIEW_COLUMNS,
+        ("biwenger_id", "sofascore_team_id"),
+    )
+    return unapplied
+
+
+def _so_team_review_rows(
+    biw_id: str, team, competition: str, cands: list[dict], club_suitors: dict[str, set[str]]
+) -> list[dict]:
+    shared = any(len(club_suitors[club["club_id"]]) > 1 for club in cands)
+    motivo = "candidato-compartido" if shared else "varios-candidatos"
+    return [
+        {
+            "biwenger_id": biw_id,
+            "biwenger_name": str(team.name),
+            "competition": competition,
+            "sofascore_team_id": club["club_id"],
+            "sofascore_team_name": club["club_name"],
+            "motivo": motivo,
+            "decision": "",
+        }
+        for club in cands
+    ]
+
+
+def _map_players_sofascore(
+    store: MappingStore,
+    biw_players: pd.DataFrame,
+    so_season: pd.DataFrame,
+    so_all: pd.DataFrame,
+    today: str,
+) -> list[UnappliedDecision]:
+    """Cuelga cada jugador de SofaScore del canónico del jugador de Biwenger."""
+    so_club_to_canonical = store.canonical_by_source(store.teams, SOFASCORE)
+    biw_team_to_canonical = store.canonical_by_source(store.teams, BIWENGER)
+    biw_canonical = store.canonical_by_source(store.players, BIWENGER)
+
+    so_by_canonical: dict[str, list[dict]] = defaultdict(list)
+    for row in so_season.dropna(subset=["sofascore_player_id"]).itertuples():
+        if not pd.isna(row.team_id):
+            canonical = so_club_to_canonical.get(str(int(row.team_id)))
+            if canonical:
+                so_by_canonical[canonical].append(_so_record(row))
+    pool = _global_pool(so_all, id_col="sofascore_player_id", record=_so_record)
+
+    resolved = _biwenger_ids_with_source(store.players, SOFASCORE)
+    taken = store.approved_ids(store.players, SOFASCORE)
+    old_review = store.players_review_sofascore
+
+    # ``y`` cuelga el id de SofaScore del canónico de Biwenger; ``skip`` confirma que
+    # el jugador no tiene contraparte (lo da por resuelto sin añadir nada). Un ``y``
+    # sobre un Biwenger todavía sin canónico no se aplica (biwenger-sin-canonico).
+    unapplied = _apply_source_decisions(
+        old_review,
+        resolved,
+        taken,
+        biw_canonical,
+        store.add_player,
+        "jugador",
+        "sofascore_id",
+        today,
+    )
+
+    free_pool = [c for c in pool if c["id"] not in taken]
+    proposals: list[_Proposal] = []
+    players_by_id: dict[str, object] = {}
+    for player in biw_players.sort_values(["competition", "id"]).itertuples():
+        biw_id = str(int(player.id))
+        # Solo entran los que ya tienen canónico y aún no tienen SofaScore.
+        if biw_id in resolved or biw_id not in biw_canonical:
+            continue
+        canonical_team = (
+            biw_team_to_canonical.get(str(int(player.team_id)))
+            if not pd.isna(player.team_id)
+            else None
+        )
+        biw_birth = "" if pd.isna(player.birth_date) else str(player.birth_date)[:10]
+        in_club = [
+            c
+            for c in (so_by_canonical.get(canonical_team, []) if canonical_team else [])
+            if c["id"] not in taken
+        ]
+        cands, scope = _candidates(str(player.name), biw_birth, in_club, free_pool)
+        proposals.append(_Proposal(biw_id, biw_birth, cands, scope))
+        players_by_id[biw_id] = player
+
+    review_rows: list[dict] = []
+    for proposal, match, cands, motivo in _resolve_graph(proposals):
+        biw_id, biw_birth = proposal.left_id, proposal.birth_date
+        player = players_by_id[biw_id]
+        if match is not None:
+            store.add_player(
+                biw_canonical[biw_id], [(SOFASCORE, match["id"])], method="auto", date=today
+            )
+            resolved.add(biw_id)
+            continue
+        if not cands:
+            # Sin candidatos no es un dudoso: SofaScore solo cubre lo backfilleado,
+            # así que la ausencia es lo esperado y el jugador queda pendiente. Su id
+            # de SofaScore sin resolver ya lo cuenta la métrica del informe.
+            continue
+        review_rows += [_so_player_row(biw_id, player, c, motivo, biw_birth) for c in cands]
+
+    store.players_review_sofascore = _preserve_decisions(
+        review_rows,
+        old_review,
+        resolved,
+        SOFASCORE_PLAYER_REVIEW_COLUMNS,
+        ("biwenger_id", "sofascore_id"),
+    )
+    return unapplied
+
+
+def _so_player_row(biw_id: str, player, cand: dict | None, motivo: str, biw_birth: str) -> dict:
+    return {
+        "biwenger_id": biw_id,
+        "biwenger_name": str(player.name),
+        "biwenger_team": "" if pd.isna(player.team_id) else str(int(player.team_id)),
+        "biwenger_birth_date": biw_birth,
+        "sofascore_id": cand["id"] if cand else "",
+        "sofascore_name": cand["name"] if cand else "",
+        "sofascore_team": cand["club_name"] if cand else "",
+        "sofascore_birth_date": cand["birth_date"] if cand else "",
+        "motivo": motivo,
+        "decision": "",
+    }
+
+
+def _apply_source_decisions(
+    review_df: pd.DataFrame,
+    resolved: set[str],
+    taken: set[str],
+    biw_canonical: dict[str, str],
+    add_fn,
+    kind: str,
+    source_id_attr: str,
+    today: str,
+) -> list[UnappliedDecision]:
+    """Aplica decisiones de una fuente que se cuelga de un canónico existente."""
+    unapplied: list[UnappliedDecision] = []
+    for biw_id, rows in review_df.groupby("biwenger_id"):
+        biw_id = str(biw_id)
+        if biw_id in resolved:
+            continue
+        marked = [
+            (row, _decision(row.decision)) for row in rows.itertuples() if str(row.decision).strip()
+        ]
+        if not marked:
+            continue
+
+        action, problems = _classify_group(marked, source_id_attr, taken)
+        unapplied += [
+            UnappliedDecision(
+                kind=kind,
+                biwenger_id=biw_id,
+                biwenger_name=str(row.biwenger_name),
+                tm_id=str(getattr(row, source_id_attr) or ""),
+                decision=str(row.decision),
+                motivo=motivo,
+            )
+            for row, motivo in problems
+        ]
+        if action is None:
+            continue
+
+        verb, source_id = action
+        if verb == "yes":
+            canonical = biw_canonical.get(biw_id)
+            if not canonical:
+                # Biwenger aún no tiene canónico (su Transfermarkt sigue pendiente):
+                # no hay de qué colgar SofaScore. Se conserva la decisión y se reporta.
+                unapplied.append(
+                    UnappliedDecision(
+                        kind=kind,
+                        biwenger_id=biw_id,
+                        biwenger_name=str(marked[0][0].biwenger_name),
+                        tm_id=source_id,
+                        decision="y",
+                        motivo="biwenger-sin-canonico",
+                    )
+                )
+                continue
+            add_fn(canonical, [(SOFASCORE, source_id)], method="manual", date=today)
+            resolved.add(biw_id)
+            taken.add(source_id)
+        else:  # skip: se confirma que no tiene contraparte en SofaScore
+            resolved.add(biw_id)
+    return unapplied
+
+
 # --- informe y verificación --------------------------------------------------
 
 
-def _report(store: MappingStore, biw_teams: pd.DataFrame, biw_players: pd.DataFrame) -> MapReport:
+def _report(
+    store: MappingStore,
+    biw_teams: pd.DataFrame,
+    biw_players: pd.DataFrame,
+    so_players_all: pd.DataFrame,
+) -> MapReport:
     team_ids = {str(int(v)) for v in biw_teams["id"].dropna()}
     player_ids = {str(int(v)) for v in biw_players["id"].dropna()}
     approved_teams = store.approved_ids(store.teams, BIWENGER) & team_ids
     approved_players = store.players[store.players["fuente"] == BIWENGER]
     approved_players = approved_players[approved_players["id_en_fuente"].isin(player_ids)]
+
+    so_ids = {str(int(v)) for v in so_players_all["sofascore_player_id"].dropna()}
+    so_mapped = store.approved_ids(store.players, SOFASCORE)
+    so_present = bool(so_ids) or not store.players[store.players["fuente"] == SOFASCORE].empty
 
     return MapReport(
         teams_total=len(team_ids),
@@ -694,6 +1065,12 @@ def _report(store: MappingStore, biw_teams: pd.DataFrame, biw_players: pd.DataFr
         players_auto=int((approved_players["metodo"] == "auto").sum()),
         players_manual=int((approved_players["metodo"] == "manual").sum()),
         players_review=store.players_review["biwenger_id"].nunique(),
+        sofascore_present=so_present,
+        sofascore_teams_mapped=int((store.teams["fuente"] == SOFASCORE).sum()),
+        sofascore_teams_review=store.teams_review_sofascore["biwenger_id"].nunique(),
+        sofascore_players_mapped=int((store.players["fuente"] == SOFASCORE).sum()),
+        sofascore_players_review=store.players_review_sofascore["biwenger_id"].nunique(),
+        sofascore_unresolved=len(so_ids - so_mapped),
     )
 
 
@@ -701,8 +1078,11 @@ def check_mappings(storage: Storage, mappings_dir) -> list[str]:
     """Devuelve los problemas de cobertura; lista vacía = todo mapeado.
 
     Falla (para CI y pipeline) si algún jugador o equipo de Biwenger presente en
-    las tablas curadas no tiene un ID canónico aprobado. Sin datos curados (p. ej.
-    en CI, donde ``data/`` está en .gitignore) no hay nada que verificar y pasa.
+    las tablas curadas no tiene un ID canónico aprobado, o si algún
+    ``sofascore_player_id`` presente en el eventing curado no tiene canónico: sin
+    ese cruce el eventing queda huérfano y no se puede unir a la identidad. Sin
+    datos curados (p. ej. en CI, donde ``data/`` está en .gitignore) no hay nada
+    que verificar y pasa.
     """
     biw_players = _read_curated(storage, "biwenger_players", ["id", "name", "competition"])
     biw_teams = _read_curated(storage, "biwenger_teams", ["id", "name", "competition"])
@@ -713,7 +1093,22 @@ def check_mappings(storage: Storage, mappings_dir) -> list[str]:
     problems: list[str] = []
     problems += _missing(biw_teams, store.approved_ids(store.teams, BIWENGER), "equipo")
     problems += _missing(biw_players, store.approved_ids(store.players, BIWENGER), "jugador")
+    problems += _missing_sofascore(storage, store.approved_ids(store.players, SOFASCORE))
     return problems
+
+
+def _missing_sofascore(storage: Storage, approved: set[str]) -> list[str]:
+    """IDs de SofaScore en el eventing curado que aún no tienen canónico aprobado."""
+    seen: set[str] = set()
+    for table in ("player_match_stats", "player_season_stats"):
+        df = _read_curated(storage, table, ["sofascore_player_id"])
+        for value in df["sofascore_player_id"].dropna():
+            seen.add(str(int(value)) if isinstance(value, float) else str(value))
+    return [
+        f"sofascore sin canonical: id {source_id} presente en el eventing curado"
+        for source_id in sorted(seen - approved)
+        if source_id
+    ]
 
 
 def _missing(df: pd.DataFrame, approved: set[str], kind: str) -> list[str]:

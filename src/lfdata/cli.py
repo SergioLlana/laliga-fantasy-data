@@ -9,13 +9,11 @@ import os
 
 from lfdata import __version__
 from lfdata.newcomers import SINCE_DAYS as NEWCOMER_SINCE_DAYS
+from lfdata.sources.sofascore import TOURNAMENTS as SOFASCORE_TOURNAMENTS
 from lfdata.sources.transfermarkt import DEFAULT_SEASON
 
 DEFAULT_DATA_URI = "file://./data"
 DEFAULT_MAPPINGS_DIR = "mappings"
-
-# Id de torneo (unique-tournament) de SofaScore por competición.
-SOFASCORE_TOURNAMENTS = {"la-liga": 8, "segunda-division": 54}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -202,6 +200,45 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bf_sofascore.set_defaults(func=_cmd_backfill_sofascore)
 
+    curate = subparsers.add_parser(
+        "curate",
+        help="Reconstruye tablas curadas desde raw/ o desde otras curadas (sin peticiones)",
+    )
+    curate_targets = curate.add_subparsers(dest="target", title="tablas", required=True)
+
+    so_catalog = curate_targets.add_parser(
+        "sofascore-catalog",
+        help=(
+            "Publica sofascore_players y sofascore_teams desde raw/ (event-lineups + "
+            "tournament-events): la evidencia de identidad del matcher, sin peticiones"
+        ),
+    )
+    so_catalog.add_argument(
+        "--data",
+        default=os.environ.get("LFDATA_DATA", DEFAULT_DATA_URI),
+        help=f"URI base del almacenamiento (por defecto {DEFAULT_DATA_URI} o $LFDATA_DATA)",
+    )
+    so_catalog.set_defaults(func=_cmd_curate_sofascore_catalog)
+
+    so_canonical = curate_targets.add_parser(
+        "sofascore-canonical",
+        help=(
+            "Rellena canonical_id en player_match_stats y player_season_stats cruzando "
+            "con los mappings y reescribiendo la partición (sin releer raw/)"
+        ),
+    )
+    so_canonical.add_argument(
+        "--data",
+        default=os.environ.get("LFDATA_DATA", DEFAULT_DATA_URI),
+        help=f"URI base del almacenamiento (por defecto {DEFAULT_DATA_URI} o $LFDATA_DATA)",
+    )
+    so_canonical.add_argument(
+        "--mappings",
+        default=DEFAULT_MAPPINGS_DIR,
+        help=f"Directorio de los ficheros de mappings (por defecto {DEFAULT_MAPPINGS_DIR}/)",
+    )
+    so_canonical.set_defaults(func=_cmd_curate_sofascore_canonical)
+
     crosscheck = subparsers.add_parser(
         "crosscheck",
         help="Informes de validación cruzada entre fuentes (no escriben datos curados)",
@@ -387,7 +424,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     mapper = subparsers.add_parser(
         "map",
-        help="Genera y aplica los mappings Biwenger↔Transfermarkt (IDs canónicos)",
+        help="Genera y aplica los mappings Biwenger↔Transfermarkt↔SofaScore (IDs canónicos)",
     )
     mapper.add_argument(
         "--check",
@@ -509,6 +546,24 @@ def _cmd_backfill_sofascore(args: argparse.Namespace) -> int:
         mappings_dir=args.mappings,
     )
     return _report_ingest(result, f"{args.competition} {args.season}", args.data)
+
+
+def _cmd_curate_sofascore_catalog(args: argparse.Namespace) -> int:
+    from lfdata.sources.sofascore import build_catalog
+    from lfdata.storage import Storage
+
+    storage = Storage(args.data)
+    result = build_catalog(storage)
+    return _report_ingest(result, "sofascore-catalog", args.data)
+
+
+def _cmd_curate_sofascore_canonical(args: argparse.Namespace) -> int:
+    from lfdata.sources.sofascore import restamp_canonical
+    from lfdata.storage import Storage
+
+    storage = Storage(args.data)
+    result = restamp_canonical(storage, mappings_dir=args.mappings)
+    return _report_ingest(result, "sofascore-canonical", args.data)
 
 
 def _cmd_crosscheck_minutes(args: argparse.Namespace) -> int:
