@@ -40,13 +40,16 @@ class FakeTransport:
 def _competition_payload(
     *slugs: str,
     rounds: list[tuple[int, str]] | None = None,
+    postponed_round_ids: tuple[int, ...] = (),
     coaches: list[str] | None = None,
 ) -> bytes:
     """Plantilla mínima con los jugadores dados (solo lo que exige el modelo).
 
     ``rounds`` inyecta el catálogo ``season.rounds`` (pares id, estado) que el
-    refresh por deltas usa para detectar la jornada recién terminada. ``coaches``
-    añade entrenadores, que Biwenger publica en la misma lista que los jugadores.
+    refresh por deltas usa para detectar la jornada recién terminada; las que estén
+    en ``postponed_round_ids`` se nombran con el sufijo "(postponed)" que Biwenger
+    da a las jornadas aplazadas. ``coaches`` añade entrenadores, que Biwenger
+    publica en la misma lista que los jugadores.
     """
     players = {
         str(i): {
@@ -75,7 +78,12 @@ def _competition_payload(
     season = {"id": "2026", "name": "2025/2026", "slug": "2025-2026"}
     if rounds is not None:
         season["rounds"] = [
-            {"id": rid, "name": f"J{rid}", "short": f"J{rid}", "status": status}
+            {
+                "id": rid,
+                "name": f"J{rid} (postponed)" if rid in postponed_round_ids else f"J{rid}",
+                "short": f"J{rid}",
+                "status": status,
+            }
             for rid, status in rounds
         ]
     payload = {
@@ -720,13 +728,25 @@ def test_cli_ingest_with_season_adds_reports(tmp_path: Path, monkeypatch, capsys
 DEPARTED_PLAYER_ID = 99999
 
 
-def _round_payload(round_id: int, score: int, *, catalogue_ids: tuple[int, ...]) -> bytes:
+def _round_payload(
+    round_id: int,
+    score: int,
+    *,
+    catalogue_ids: tuple[int, ...],
+    postponed_ids: tuple[int, ...] = (),
+) -> bytes:
     """Jornada sintética con un partido: un jugador local (id 1) y una baja.
 
     Los puntos valen ``score`` para el local y ``score * 2`` para la baja, para
     poder comprobar que cada una de las cinco peticiones rellena su columna. El
-    catálogo ``season.rounds`` lleva ``catalogue_ids`` (lo que se descubre).
+    catálogo ``season.rounds`` lleva ``catalogue_ids`` (lo que se descubre);
+    los que estén en ``postponed_ids`` se nombran "Round N (postponed)", como
+    hace Biwenger con las jornadas aplazadas.
     """
+
+    def _round_name(rid: int) -> str:
+        return f"Round {rid} (postponed)" if rid in postponed_ids else f"Round {rid}"
+
     return json.dumps(
         {
             "status": 200,
@@ -741,7 +761,7 @@ def _round_payload(round_id: int, score: int, *, catalogue_ids: tuple[int, ...])
                     "name": "2024/2025 season",
                     "slug": "2024-2025",
                     "rounds": [
-                        {"id": r, "name": f"Round {r}", "short": "R", "status": "finished"}
+                        {"id": r, "name": _round_name(r), "short": "R", "status": "finished"}
                         for r in catalogue_ids
                     ],
                 },
@@ -794,10 +814,17 @@ def _round_payload(round_id: int, score: int, *, catalogue_ids: tuple[int, ...])
 class RoundsTransport:
     """Enruta /data, /players (semilla) y /rounds/{id}?score=N por sistema."""
 
-    def __init__(self, competition: bytes, player: bytes, catalogue_ids: tuple[int, ...]) -> None:
+    def __init__(
+        self,
+        competition: bytes,
+        player: bytes,
+        catalogue_ids: tuple[int, ...],
+        postponed_ids: tuple[int, ...] = (),
+    ) -> None:
         self.competition = competition
         self.player = player
         self.catalogue_ids = catalogue_ids
+        self.postponed_ids = postponed_ids
         self.round_fetches: list[tuple[int, int]] = []
 
     def get(self, url, params=None) -> bytes:
@@ -805,7 +832,12 @@ class RoundsTransport:
             round_id = int(url.rsplit("/", 1)[1])
             score = int(params["score"])
             self.round_fetches.append((round_id, score))
-            return _round_payload(round_id, score, catalogue_ids=self.catalogue_ids)
+            return _round_payload(
+                round_id,
+                score,
+                catalogue_ids=self.catalogue_ids,
+                postponed_ids=self.postponed_ids,
+            )
         if "/players/" in url:
             return self.player
         return self.competition
@@ -870,6 +902,30 @@ def test_ingest_rounds_combines_five_systems(storage: Storage) -> None:
     assert bool(home["home"]) is True
     assert (home["home_score"], home["away_score"]) == (2, 0)
     assert home["result"] == "win"
+
+
+def test_ingest_rounds_skips_postponed_duplicates(storage: Storage) -> None:
+    """Una jornada "(postponed)" del catálogo no se descubre ni se cura.
+
+    Biwenger duplica la jornada aplazada con ese sufijo (mismos partidos, puntos
+    distintos): descubrirla metería cada partido dos veces en
+    ``fantasy_round_points``. Solo debe quedar la original.
+    """
+    transport = RoundsTransport(
+        _competition_payload("alex-fores"),
+        PLAYER_LA_LIGA.read_bytes(),
+        catalogue_ids=(4484, 4485, 4999),
+        postponed_ids=(4999,),
+    )
+    result = ingest_rounds(storage, "la-liga", "2025", transport=transport)
+
+    # La postponed 4999 nunca se pide (ni siquiera para su sistema 1).
+    assert 4999 not in {rid for rid, _ in transport.round_fetches}
+    points = storage.curated.read_table("fantasy_round_points")
+    assert set(points["round_id"]) == {4484, 4485}
+    # 2 jornadas × 2 jugadores; sin la postponed no hay filas duplicadas.
+    assert result.rows == {"fantasy_round_points": 4}
+    assert not points.duplicated(subset=["player_id", "match_id"]).any()
 
 
 class NullSofascoreRoundsTransport(RoundsTransport):
@@ -1160,6 +1216,33 @@ def test_delta_refreshes_only_scorers(storage: Storage) -> None:
     assert result.stats == {"jugadores refrescados": 1, "jugadores saltados": 1}
     points = storage.curated.read_table("fantasy_points")
     assert set(points["round_id"].astype(int)) == {4484}
+
+
+def test_delta_ignores_postponed_rounds(storage: Storage) -> None:
+    """Una jornada "(postponed)" del catálogo no cuenta como jornada nueva.
+
+    ``fantasy_points`` solo guarda el ``round_id`` original, así que sin filtrar la
+    postponed se vería como pendiente en cada run y se pediría su detalle una y otra
+    vez. Con la 4484 ya procesada y la 4485 aplazada, el delta no pide nada.
+    """
+    comp = _competition_payload(
+        "scorer",
+        "bench",
+        rounds=[(4484, "finished"), (4485, "finished")],
+        postponed_round_ids=(4485,),
+    )
+    round_payload = _round_payload(4484, 1, catalogue_ids=(4484,))
+    details = {"scorer": _detail_scoring_round(1, "scorer", 4484, 46124)}
+    ingest_reports_delta(
+        storage, "la-liga", "2026", transport=DeltaTransport(comp, details, round_payload)
+    )
+    # La 4485 está "finished" y no en fantasy_points, pero es postponed: se ignora.
+    second = DeltaTransport(comp, details, round_payload)
+    result = ingest_reports_delta(storage, "la-liga", "2026", transport=second)
+
+    assert second.round_fetches == []
+    assert second.detail_slugs == []
+    assert result.stats == {"jugadores refrescados": 0, "jugadores saltados": 2}
 
 
 def test_delta_no_new_round_fetches_no_details(storage: Storage) -> None:
