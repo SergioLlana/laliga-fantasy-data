@@ -39,7 +39,7 @@ Validación de estructura con modelos Pydantic: si falta un campo esperado o cam
 | `biwenger_teams` | equipo | id, slug, nombre, competición |
 | `biwenger_rounds` | jornada | id, nombre, temporada, competición, estado |
 | `fantasy_points` | jugador-partido | ids Biwenger de jugador/partido/jornada, temporada, competición, puntos en los 5 sistemas, minutos, nota sofascore (si existe), local/visitante, resultado |
-| `fantasy_round_points` | jugador-partido | ids Biwenger de jugador/equipo/partido/jornada, temporada, competición, puntos en los 5 sistemas, local/visitante, marcador, resultado. Igual que `fantasy_points` pero **sin minutos ni nota** y con *todos* los jugadores de cada jornada, incluidos los que ya dejaron la competición (el detalle por jugador da 404) |
+| `fantasy_round_points` | jugador-partido | ids Biwenger de jugador/equipo/partido/jornada, temporada, competición, columnas de puntos en los 5 sistemas, local/visitante, marcador, resultado. Con *todos* los jugadores de cada jornada, incluidos los que ya dejaron la competición (el detalle por jugador da 404). **Sirve para saber quién jugó cada jornada, no para los puntos**: sus columnas `points_*` no son el punto canónico del sistema y no coinciden con `fantasy_points`, que es la única fuente autoritativa de puntos ([ADR 0010](../adr/0010-jornadas-postponed-duplicadas.md)) |
 | `biwenger_prices` | jugador-día | id jugador, fecha, precio, temporada |
 
 Nota: estas tablas llevan aún IDs de Biwenger. El ID canónico llega en el paso 2; a partir de entonces `fantasy_points` y `biwenger_prices` se publican con ambos.

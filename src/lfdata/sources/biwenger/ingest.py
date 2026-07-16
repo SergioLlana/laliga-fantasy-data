@@ -9,7 +9,13 @@ from datetime import UTC, date, datetime, timedelta
 import pandas as pd
 
 from lfdata.sources.biwenger.client import PROXY_OVERFLOW, WAIT_SECONDS, BiwengerClient
-from lfdata.sources.biwenger.models import CompetitionData, Player, PlayerDetail, RoundData
+from lfdata.sources.biwenger.models import (
+    CompetitionData,
+    Player,
+    PlayerDetail,
+    RoundData,
+    SeasonRound,
+)
 from lfdata.sources.http import HttpTransport, SourceHTTPError, scrapeops_proxy_from_env
 from lfdata.sources.ingestion import IngestResult, PlayerFailure
 from lfdata.storage import Storage
@@ -28,6 +34,23 @@ POINT_COLUMNS = list(POINT_SYSTEMS.values())
 
 # Motivo de anomalía: reports que Biwenger sirve con puntos pero sin rawStats.
 POINTS_WITHOUT_STATS = "reports con puntos sin rawStats"
+
+# Cuando hubo aplazamientos, Biwenger duplica la jornada entera en su catálogo
+# (``season.rounds``) con el sufijo "(postponed)" en el nombre: misma jornada,
+# mismos partidos, mismas fechas y el mismo estado "finished", pero con puntos
+# distintos para cada jugador-partido. Sin filtrar por el nombre, el descubrimiento
+# se queda con las dos copias y cada partido acaba duplicado en
+# ``fantasy_round_points`` ([ADR 0010](docs/adr/0010-jornadas-postponed-duplicadas.md)).
+# El detalle por jugador (``fantasy_points``) reporta esos partidos bajo el
+# ``round_id`` original, así que quedarse solo con la original mantiene ambas tablas
+# unibles por ``(player_id, round_id)``.
+POSTPONED_MARKER = "postponed"
+
+
+def _is_postponed(round_meta: SeasonRound) -> bool:
+    """Si la jornada del catálogo es una copia "(postponed)" de otra ya presente."""
+    return POSTPONED_MARKER in round_meta.name.lower()
+
 
 # Biwenger publica a los entrenadores en la misma lista que a los jugadores, con
 # ficha propia (precio, puntos): Flick, Mourinho, Simeone... No son jugadores —no
@@ -410,7 +433,9 @@ def ingest_reports_delta(
 
     En lugar de recorrer los ~634 de la plantilla, mira el catálogo de jornadas
     que la plantilla ya trae (``season.rounds``), detecta las jornadas terminadas
-    que aún no están en ``fantasy_points`` y, por cada una, pide la jornada vía
+    que aún no están en ``fantasy_points`` —descartando las copias "(postponed)",
+    que si no se verían como jornada nueva en cada run porque ``fantasy_points``
+    solo guarda el ``round_id`` original— y, por cada una, pide la jornada vía
     rounds (1 petición) para obtener la lista exacta de quienes puntuaron (~280).
     Solo esos jugadores de la plantilla refrescan su detalle (reports, precios,
     birthday). Como una jornada solo genera fila en ``fantasy_points`` para quien
@@ -437,7 +462,11 @@ def ingest_reports_delta(
             "fantasy_points", "round_id", partition=partition
         )
     }
-    pending = [r for r in data.season.rounds if r.status == "finished" and r.id not in processed]
+    pending = [
+        r
+        for r in data.season.rounds
+        if r.status == "finished" and not _is_postponed(r) and r.id not in processed
+    ]
 
     if not pending:
         logger.info(
@@ -642,6 +671,8 @@ def ingest_rounds(
     Descubre las jornadas de la temporada (a menos que se pasen en ``round_ids``)
     sembrando un ``round_id`` desde el detalle de un veterano de la plantilla
     actual y leyendo el catálogo ``season.rounds`` de la respuesta de esa jornada.
+    Del catálogo se descartan las copias "(postponed)" (:func:`_is_postponed`):
+    duplican una jornada ya presente y meterían cada partido dos veces.
     Para cada jornada hace cinco peticiones (una por sistema de puntuación) y
     vuelca una fila por jugador-partido con los cinco sistemas como columnas,
     incluidos los jugadores que ya dejaron la competición. De cada jornada guarda
@@ -673,7 +704,11 @@ def ingest_rounds(
             )
         catalogue = client.fetch_round(competition, seed, 1).data
         requests += 1
-        round_ids = [r.id for r in catalogue.season.rounds if r.status in (None, "finished")]
+        round_ids = [
+            r.id
+            for r in catalogue.season.rounds
+            if r.status in (None, "finished") and not _is_postponed(r)
+        ]
         logger.info(
             "biwenger rounds %s %s: %d jornadas descubiertas desde la jornada %d",
             competition,
