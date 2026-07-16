@@ -144,6 +144,58 @@ def test_last_download_date_returns_newest(storage: Storage) -> None:
     assert storage.raw.last_download_date("s", "d", "x") == date(2026, 7, 5)
 
 
+class CountingBackend(InMemoryBackend):
+    """InMemoryBackend que lleva la cuenta de las llamadas a ``list_keys``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.list_calls = 0
+
+    def list_keys(self, prefix: str) -> list[str]:
+        self.list_calls += 1
+        return super().list_keys(prefix)
+
+
+def test_read_latest_lists_the_dataset_once_per_run() -> None:
+    backend = CountingBackend()
+    raw = RawStore(backend)
+    raw.save("s", "d", "a", b"1", download_date=date(2026, 7, 1))
+    raw.save("s", "d", "b", b"2", download_date=date(2026, 7, 1))
+    backend.list_calls = 0
+
+    # Curar a varios jugadores del mismo dataset no vuelve a enumerar el prefijo.
+    assert raw.read_latest("s", "d", "a") == b"1"
+    assert raw.read_latest("s", "d", "b") == b"2"
+    assert raw.last_download_date("s", "d", "a") == date(2026, 7, 1)
+    assert backend.list_calls == 1
+
+
+def test_save_keeps_the_cached_listing_in_sync() -> None:
+    backend = CountingBackend()
+    raw = RawStore(backend)
+    raw.save("s", "d", "a", b"1", download_date=date(2026, 7, 1))
+    assert raw.read_latest("s", "d", "a") == b"1"  # puebla el caché
+    backend.list_calls = 0
+
+    # Un fichero escrito después es visible sin re-listar el prefijo.
+    raw.save("s", "d", "b", b"2", download_date=date(2026, 7, 2))
+    assert raw.read_latest("s", "d", "b") == b"2"
+    assert raw.last_download_date("s", "d", "b") == date(2026, 7, 2)
+    assert backend.list_calls == 0
+
+
+def test_listing_cache_is_scoped_per_dataset() -> None:
+    backend = CountingBackend()
+    raw = RawStore(backend)
+    raw.save("s", "d1", "a", b"1", download_date=date(2026, 7, 1))
+    raw.save("s", "d2", "a", b"2", download_date=date(2026, 7, 1))
+    backend.list_calls = 0
+
+    assert raw.read_latest("s", "d1", "a") == b"1"
+    assert raw.read_latest("s", "d2", "a") == b"2"
+    assert backend.list_calls == 2
+
+
 def test_unsupported_uri_scheme_raises() -> None:
     with pytest.raises(ValueError, match="no soportada"):
         backend_from_uri("ftp://x")
