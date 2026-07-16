@@ -5,7 +5,12 @@ canónico** (ADR 0001). Vive en git, no en S3: el trabajo manual de revisión es
 código y se revisa en pull request.
 
 Anclamos la identidad en **Biwenger** (el universo que la plataforma necesita) y
-buscamos su contraparte en **Transfermarkt**.
+buscamos su contraparte en **Transfermarkt** primero y en **SofaScore** después.
+Transfermarkt crea el ID canónico; **SofaScore se cuelga del canónico que Biwenger
+ya obtuvo de Transfermarkt** (no crea identidades nuevas), con la misma regla
+biunívoca. Por eso Transfermarkt va primero: sin canónico no hay de qué colgar
+SofaScore, y si el Transfermarkt de un jugador sigue en revisión, su SofaScore
+espera a la siguiente pasada.
 
 ## Cómo se busca la contraparte
 
@@ -37,8 +42,25 @@ competía con su hijo *Giuliano* por la misma ficha de Transfermarkt.
 
 | Fichero | Qué contiene |
 |---|---|
-| `players.csv` / `teams.csv` | Mappings **aprobados**. Formato largo: una fila por `(fuente, id_en_fuente)`, todas con el mismo `canonical_id`. `metodo` es `auto` o `manual`. |
-| `players-review.csv` / `teams-review.csv` | **Candidatos dudosos** con sus evidencias y una columna `decision` vacía. |
+| `players.csv` / `teams.csv` | Mappings **aprobados** (todas las fuentes). Formato largo: una fila por `(fuente, id_en_fuente)`, todas con el mismo `canonical_id`. `metodo` es `auto` o `manual`. |
+| `players-review.csv` / `teams-review.csv` | **Candidatos dudosos** de Transfermarkt, con sus evidencias y una columna `decision` vacía. |
+| `sofascore-review.csv` / `sofascore-teams-review.csv` | Igual, para SofaScore: la evidencia trae los dos lados (nombre, equipo y fecha de nacimiento de Biwenger y de SofaScore). Solo se escriben cuando hay catálogo de SofaScore que revisar. |
+
+## SofaScore
+
+La evidencia del matcher de SofaScore (nombre, **fecha de nacimiento** y club) no
+está en `player_match_stats` ni en `search/all`; solo viene entera en las
+alineaciones. Se publica aparte, desde raw/ y sin peticiones, con
+`lfdata curate sofascore-catalog`, que construye dos tablas curadas —
+`sofascore_players` y `sofascore_teams`— con la cobertura de lo backfilleado
+(La Liga/Segunda). `lfdata map` las lee como lee las de Transfermarkt.
+
+Un `y`/`skip` en `sofascore-review.csv` funciona igual que en Transfermarkt, con un
+motivo extra posible: `biwenger-sin-canonico` (marcaste `y` pero el jugador de
+Biwenger aún no tiene canónico porque su Transfermarkt sigue en revisión; resuélvelo
+primero). Tras aprobar mappings nuevos, `lfdata curate sofascore-canonical` rellena
+el `canonical_id` de `player_match_stats`/`player_season_stats` cruzándolas con los
+mappings (sin releer raw/).
 
 ## Flujo
 
@@ -65,7 +87,8 @@ competía con su hijo *Giuliano* por la misma ficha de Transfermarkt.
    (como `manual`) y vuelve a proponer solo lo que siga sin resolver. Es
    idempotente: lo aprobado no se vuelve a tocar.
 4. `lfdata map --check` falla (CI y pipeline) si algún jugador o equipo de
-   Biwenger presente en las tablas curadas se quedó sin `canonical_id`, o si los
+   Biwenger presente en las tablas curadas se quedó sin `canonical_id`, si algún
+   `sofascore_player_id` del eventing curado no tiene canónico aprobado, o si los
    ficheros de aprobados violan la integridad (ver abajo).
 
 ## Decisiones que no se pueden aplicar

@@ -150,6 +150,14 @@ def backend_from_uri(base_uri: str) -> StorageBackend:
     raise ValueError(f"URI de almacenamiento no soportada: {base_uri!r}")
 
 
+def _partition_date(segment: str) -> date | None:
+    """Fecha de una partición ``fecha_descarga=YYYY-MM-DD``, o ``None`` si no lo es."""
+    try:
+        return date.fromisoformat(segment.removeprefix("fecha_descarga="))
+    except ValueError:
+        return None
+
+
 class RawStore:
     """Respuestas de las fuentes tal cual llegan, antes de interpretarlas."""
 
@@ -184,6 +192,33 @@ class RawStore:
         """
         return self._last_download(source, dataset, name, extension)[0]
 
+    def iter_latest(self, source: str, dataset: str, *, extension: str = "json"):
+        """``(name, payload)`` de la descarga más reciente de **cada** nombre del dataset.
+
+        Recorre las particiones ``fecha_descarga=…`` una sola vez y, por cada
+        nombre de fichero, se queda con la fecha más nueva. Sirve para reconstruir
+        una tabla curada desde todo el raw de un dataset (p. ej. el catálogo de
+        SofaScore) sin volver a pedir nada (ADR 0003).
+        """
+        prefix = f"raw/{source}/{dataset}/"
+        suffix = f".{extension}"
+        latest: dict[str, tuple[date, str]] = {}
+        for key in self._backend.list_keys(prefix):
+            if not key.endswith(suffix):
+                continue
+            rest = key[len(prefix) :]
+            partition, _, filename = rest.partition("/")
+            if not filename:
+                continue
+            name = filename[: -len(suffix)]
+            download_date = _partition_date(partition)
+            if download_date is None:
+                continue
+            if name not in latest or download_date > latest[name][0]:
+                latest[name] = (download_date, key)
+        for name in sorted(latest):
+            yield name, self._backend.read_bytes(latest[name][1])
+
     def read_latest(
         self, source: str, dataset: str, name: str, *, extension: str = "json"
     ) -> bytes | None:
@@ -209,10 +244,9 @@ class RawStore:
             if not key.endswith(suffix):
                 continue
             partition = key[len(prefix) :].split("/", 1)[0]
-            try:
-                found.append((date.fromisoformat(partition.removeprefix("fecha_descarga=")), key))
-            except ValueError:
-                continue
+            download_date = _partition_date(partition)
+            if download_date is not None:
+                found.append((download_date, key))
         if not found:
             return None, None
         return max(found, key=lambda item: item[0])

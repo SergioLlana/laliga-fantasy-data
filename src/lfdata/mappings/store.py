@@ -46,8 +46,35 @@ TEAM_REVIEW_COLUMNS = [
     "decision",
 ]
 
+# Revisión de SofaScore: como la de Transfermarkt pero con la evidencia de ambos
+# lados (nombre, equipo y fecha de nacimiento de Biwenger y de SofaScore), porque
+# SofaScore se cuelga del canónico que Biwenger ya tiene (no crea identidades).
+SOFASCORE_PLAYER_REVIEW_COLUMNS = [
+    "biwenger_id",
+    "biwenger_name",
+    "biwenger_team",
+    "biwenger_birth_date",
+    "sofascore_id",
+    "sofascore_name",
+    "sofascore_team",
+    "sofascore_birth_date",
+    "motivo",
+    "decision",
+]
+
+SOFASCORE_TEAM_REVIEW_COLUMNS = [
+    "biwenger_id",
+    "biwenger_name",
+    "competition",
+    "sofascore_team_id",
+    "sofascore_team_name",
+    "motivo",
+    "decision",
+]
+
 BIWENGER = "biwenger"
 TRANSFERMARKT = "transfermarkt"
+SOFASCORE = "sofascore"
 
 _ID_SUFFIX = re.compile(r"(\d+)$")
 
@@ -119,6 +146,8 @@ class MappingStore:
         self.teams = pd.DataFrame(columns=APPROVED_COLUMNS)
         self.players_review = pd.DataFrame(columns=PLAYER_REVIEW_COLUMNS)
         self.teams_review = pd.DataFrame(columns=TEAM_REVIEW_COLUMNS)
+        self.players_review_sofascore = pd.DataFrame(columns=SOFASCORE_PLAYER_REVIEW_COLUMNS)
+        self.teams_review_sofascore = pd.DataFrame(columns=SOFASCORE_TEAM_REVIEW_COLUMNS)
 
     # --- IO ------------------------------------------------------------------
 
@@ -127,6 +156,12 @@ class MappingStore:
         self.teams = _read_csv(self.root / "teams.csv", APPROVED_COLUMNS)
         self.players_review = _read_csv(self.root / "players-review.csv", PLAYER_REVIEW_COLUMNS)
         self.teams_review = _read_csv(self.root / "teams-review.csv", TEAM_REVIEW_COLUMNS)
+        self.players_review_sofascore = _read_csv(
+            self.root / "sofascore-review.csv", SOFASCORE_PLAYER_REVIEW_COLUMNS
+        )
+        self.teams_review_sofascore = _read_csv(
+            self.root / "sofascore-teams-review.csv", SOFASCORE_TEAM_REVIEW_COLUMNS
+        )
         self.validate()
 
     def validate(self) -> None:
@@ -143,9 +178,21 @@ class MappingStore:
         self._save(self.teams.sort_values(["canonical_id", "fuente"]), "teams.csv")
         self._save(self.players_review.sort_values("biwenger_id"), "players-review.csv")
         self._save(self.teams_review.sort_values("biwenger_id"), "teams-review.csv")
+        # Los de SofaScore solo se escriben si hay algo que revisar (o el fichero ya
+        # existía): una pasada sin catálogo de SofaScore no debe crear ficheros vacíos.
+        self._save_if_relevant(
+            self.teams_review_sofascore.sort_values("biwenger_id"), "sofascore-teams-review.csv"
+        )
+        self._save_if_relevant(
+            self.players_review_sofascore.sort_values("biwenger_id"), "sofascore-review.csv"
+        )
 
     def _save(self, df: pd.DataFrame, name: str) -> None:
         df.to_csv(self.root / name, index=False)
+
+    def _save_if_relevant(self, df: pd.DataFrame, name: str) -> None:
+        if not df.empty or (self.root / name).exists():
+            self._save(df, name)
 
     # --- consultas de estado -------------------------------------------------
 

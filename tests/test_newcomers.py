@@ -225,8 +225,8 @@ def test_newcomer_ends_up_with_curated_history_without_intervention(
 
     # Historial curado: sus partidos de SofaScore, en las dos ligas por las que ha
     # pasado. Las filas llevan su id de SofaScore; el enlace al ID canónico lo
-    # aprueba la ronda de matching de SofaScore (que sigue siendo manual), y
-    # mientras tanto el jugador queda encolado en sofascore-review.csv.
+    # resuelve luego `lfdata map` desde el catálogo sofascore_players y un
+    # re-estampado con `lfdata curate sofascore-canonical`.
     matches = storage.curated.read_table("player_match_stats")
     assert not matches.empty
     assert set(matches["sofascore_player_id"]) == {1086128}
@@ -279,7 +279,7 @@ def test_doubtful_mapping_is_enqueued_and_the_run_survives(
     assert not storage.curated.read_table("player_match_stats").empty
 
 
-def test_unmapped_sofascore_player_is_enqueued_for_review(storage: Storage, mappings: Path) -> None:
+def test_unmapped_sofascore_player_leaves_empty_canonical(storage: Storage, mappings: Path) -> None:
     approve_player(mappings)
 
     run(
@@ -289,8 +289,13 @@ def test_unmapped_sofascore_player_is_enqueued_for_review(storage: Storage, mapp
         RoutingTransport(transfermarkt_routes()),
     )
 
-    review = pd.read_csv(mappings / "sofascore-review.csv", dtype=str)
-    assert "1086128" in set(review["sofascore_id"])
+    # El historial se cura con el id de SofaScore pero sin canónico: la ingesta ya
+    # no escribe un fichero de revisión propio (lo resuelve `lfdata map` sobre el
+    # catálogo sofascore_players, no un encolado a ciegas por nombre).
+    matches = storage.curated.read_table("player_match_stats")
+    assert set(matches["sofascore_player_id"]) == {1086128}
+    assert (matches["canonical_id"] == "").all()
+    assert not (mappings / "sofascore-review.csv").exists()
 
 
 def test_player_without_sofascore_profile_is_recorded_and_retried(

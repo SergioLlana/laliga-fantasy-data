@@ -26,6 +26,13 @@ from lfdata.storage import RawStore
 
 API_BASE = "https://api.sofascore.com/api/v1"
 WAIT_SECONDS = 3.0
+
+# Competiciones cubiertas: slug del proyecto ↔ id de ``unique-tournament`` de
+# SofaScore. Única fuente de verdad; el CLI (choices y resolución del backfill) y el
+# catálogo (id → slug) derivan de aquí, para no mantener dos dicts inversos a mano.
+TOURNAMENTS = {"la-liga": 8, "segunda-division": 54}
+COMPETITION_BY_TOURNAMENT = {ut_id: slug for slug, ut_id in TOURNAMENTS.items()}
+
 # SofaScore veta por huella TLS (403 con curl normal) y puede cortar por IP ante
 # volumen. Se permite desbordar a ScrapeOps (rota IPs y resuelve Cloudflare) solo
 # tras confirmar el bloqueo; hasta entonces va directo con curl-cffi (gratis). El

@@ -157,7 +157,7 @@ def test_ingest_populates_per_match_event_metrics(tmp_path):
     assert row["source"] == "sofascore"
 
 
-def test_unmapped_player_has_empty_canonical_and_is_enqueued(tmp_path):
+def test_unmapped_player_has_empty_canonical(tmp_path):
     mappings = tmp_path / "mappings"
     storage = storage_at(tmp_path)
     ingest_player(
@@ -169,9 +169,9 @@ def test_unmapped_player_has_empty_canonical_and_is_enqueued(tmp_path):
 
     season = storage.curated.read_table("player_season_stats")
     assert (season["canonical_id"] == "").all()
-
-    review = pd.read_csv(mappings / "sofascore-review.csv", dtype=str)
-    assert str(FORES) in set(review["sofascore_id"].astype(str))
+    # El id sin mapping se resuelve luego con `lfdata map` sobre el catálogo
+    # sofascore_players; la ingesta ya no escribe un fichero de revisión propio.
+    assert not (mappings / "sofascore-review.csv").exists()
 
 
 def test_mapped_player_gets_canonical_id_and_no_review(tmp_path):

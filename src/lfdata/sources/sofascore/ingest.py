@@ -9,8 +9,9 @@ curadas:
   (minutos, pases, remates, goles, asistencias, xG...), una petición por partido.
 
 Cada fila lleva ``canonical_id`` si el id de SofaScore ya está mapeado (ADR 0001);
-si no, la fila conserva solo el ``sofascore_player_id`` y el jugador se encola en
-``mappings/sofascore-review.csv`` para una ronda de matching posterior.
+si no, la fila conserva solo el ``sofascore_player_id`` y se resuelve en una ronda
+posterior de ``lfdata map`` (que propone el canónico desde el catálogo
+``sofascore_players``) y un re-estampado con ``lfdata curate sofascore-canonical``.
 
 Es el modo más simple del paso 3 (docs/implementation/03) y desbloquea el
 baseline de fichajes (paso 5): dado un fichaje de otra liga, un comando trae su
@@ -68,8 +69,6 @@ _SEASON_SKIP = {"id", "type", "statisticsType"}
 _MATCH_KEY = "player_event"
 _SEASON_KEY = "sofascore_player_id"
 
-REVIEW_COLUMNS = ["sofascore_id", "sofascore_name", "sofascore_team", "sofascore_dob", "decision"]
-
 
 def ingest_player(
     storage: Storage,
@@ -93,10 +92,8 @@ def ingest_player(
     store.load()
     canonical_by_sofascore = MappingStore.canonical_by_source(store.players, SOURCE)
 
-    player_id, name, team, dob = _resolve_player(client, query, store)
+    player_id, name = _resolve_player(client, query, store)
     canonical_id = canonical_by_sofascore.get(str(player_id), "")
-    if not canonical_id:
-        _enqueue_review(Path(mappings_dir), player_id, name, team, dob)
 
     seasons = client.fetch_seasons(player_id).unique_tournament_seasons
     result = IngestResult(
@@ -267,6 +264,24 @@ def season_year_label(year: int) -> str:
     return f"{year % 100:02d}/{(year + 1) % 100:02d}"
 
 
+def season_start_year(year_label: str | None) -> int | None:
+    """Inverso de :func:`season_year_label`: etiqueta de SofaScore → año de inicio.
+
+    ``"25/26"`` → 2025, como ``--season`` en las demás fuentes. Una temporada de un
+    solo año (``"2025"``) se toma tal cual; una etiqueta ilegible da ``None``.
+    """
+    if not year_label:
+        return None
+    head = year_label.split("/", 1)[0].strip()
+    if not head.isdigit():
+        return None
+    value = int(head)
+    if len(head) == 4:
+        return value
+    # Dos dígitos: 25 → 2025, 99 → 1999 (SofaScore no tiene ligas antes de los 90).
+    return 2000 + value if value < 90 else 1900 + value
+
+
 def resolve_season_id(client: SofaScoreClient, tournament_id: int, year: int) -> int:
     """Id de temporada de SofaScore para un año de inicio (2025 → temporada 25/26)."""
     target = season_year_label(year)
@@ -341,12 +356,12 @@ def _lineup_rows(
 
 def _resolve_player(
     client: SofaScoreClient, query: str, store: MappingStore
-) -> tuple[int, str | None, str | None, str | None]:
-    """Resuelve ``query`` a (id SofaScore, nombre, club, fecha de nacimiento).
+) -> tuple[int, str | None]:
+    """Resuelve ``query`` a ``(id SofaScore, nombre)``.
 
-    La fecha de nacimiento siempre sale ``None``: ``search/all`` no la publica (ver
-    :class:`~lfdata.sources.sofascore.models.SearchPlayer`); la identidad se verifica
-    luego contra el catálogo, no con la búsqueda.
+    El club y la fecha de nacimiento de ``search/all`` no se usan (la fecha ni
+    siquiera se publica, y el club puede estar desfasado): la identidad se resuelve
+    después contra el catálogo con ``lfdata map``, no con la búsqueda.
 
     - ``canonical_id`` (``p\\d+``): busca su id de SofaScore en los mappings
       aprobados; si no lo tiene, es un error (no hay a quién descargar).
@@ -362,18 +377,15 @@ def _resolve_player(
                 f"{query} no tiene mapping a SofaScore todavía; "
                 "ingiere por nombre o id de SofaScore."
             )
-        return int(rows.iloc[0]["id_en_fuente"]), None, None, None
+        return int(rows.iloc[0]["id_en_fuente"]), None
 
     if query.isdigit():
-        return int(query), None, None, None
+        return int(query), None
 
     players = client.search_players(query).players()
     if not players:
         raise ValueError(f"SofaScore no devolvió ningún jugador para {query!r}.")
-    best = players[0]
-    # search/all no publica la fecha de nacimiento (solo llega en los lineups y en
-    # la estadística por evento), así que aquí no hay fecha con la que desempatar.
-    return best.id, best.name, (best.team.name if best.team else None), None
+    return players[0].id, players[0].name
 
 
 def _event_stats(
@@ -452,35 +464,3 @@ def _as_number(value):
     if isinstance(value, (int, float)):
         return value
     return None
-
-
-def _enqueue_review(
-    mappings_dir: Path, player_id: int, name: str | None, team: str | None, dob: str | None
-) -> None:
-    """Añade el jugador sin mapping a mappings/sofascore-review.csv (idempotente).
-
-    El fichero es la cola para la ronda de matching de IDs de SofaScore a
-    canónicos (paso 3, orden de trabajo 5). Si el id ya está encolado no se
-    duplica; el trabajo manual posterior rellena ``decision``.
-    """
-    path = mappings_dir / "sofascore-review.csv"
-    if path.exists():
-        review = pd.read_csv(path, dtype=str, keep_default_na=False)
-        for col in REVIEW_COLUMNS:
-            if col not in review.columns:
-                review[col] = ""
-        review = review[REVIEW_COLUMNS]
-    else:
-        review = pd.DataFrame(columns=REVIEW_COLUMNS)
-    if str(player_id) in set(review["sofascore_id"]):
-        return
-    new_row = {
-        "sofascore_id": str(player_id),
-        "sofascore_name": name or "",
-        "sofascore_team": team or "",
-        "sofascore_dob": dob or "",
-        "decision": "",
-    }
-    review = pd.concat([review, pd.DataFrame([new_row])], ignore_index=True)
-    mappings_dir.mkdir(parents=True, exist_ok=True)
-    review.to_csv(path, index=False)

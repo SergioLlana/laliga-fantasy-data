@@ -20,8 +20,8 @@ La temporada actual es 2026 y no se backfillea: entra por el incremental. Solo s
 backfillea **La Liga**: Segunda y el resto de ligas de origen se cubren bajo demanda
 cuando llega un fichaje (ver la última sección). Las temporadas se cargan
 **temporada a temporada**, porque `map --season N` necesita las plantillas de
-Biwenger y Transfermarkt de N ya curadas, y el backfill de SofaScore aprovecha los
-mappings existentes (sin ellos, encola a revisión jugadores que sí tienen canónico).
+Biwenger y Transfermarkt de N ya curadas, y el matching de SofaScore necesita a su
+vez el eventing de N ya descargado (de sus alineaciones sale el catálogo de identidad).
 
 Para cada temporada `N` de 2021 a 2025, en este orden:
 
@@ -40,19 +40,31 @@ uv run lfdata ingest transfermarkt --competition la-liga --season N --since-days
 #    --since-days N  no re-pide a la fuente al jugador bajado hace < N días,
 #                    pero lo cura igual desde raw/
 
-# 4. Mappings a IDs canónicos y revisión manual de dudosos
+# 4. Mappings Biwenger↔Transfermarkt (crea los IDs canónicos) y revisión de dudosos
 uv run lfdata map --season N
 #    revisar mappings/*-review.csv (ver mappings/README.md); nunca `skip` a la ligera
 
 # 5. Eventing de SofaScore (reanudable de serie: solo descarga los partidos que faltan)
 uv run lfdata backfill sofascore --competition la-liga --season N
 #    --max-matches / --max-pages   acotan una prueba parcial
+
+# 6. Catálogo de identidad de SofaScore desde raw/ (de las alineaciones del paso 5),
+#    sin peticiones: es la evidencia que el matcher necesita para SofaScore
+uv run lfdata curate sofascore-catalog
+
+# 7. Segunda pasada de mappings: ahora cuelga SofaScore del canónico de cada jugador
+uv run lfdata map --season N
+#    revisar mappings/sofascore-review.csv (mismos criterios; ver mappings/README.md)
+
+# 8. Re-estampa el canonical_id en el eventing ya curado (cruce con los mappings,
+#    sin releer raw/), para que player_match_stats deje de estar huérfano
+uv run lfdata curate sofascore-canonical
 ```
 
 Al terminar las cinco temporadas:
 
 ```bash
-uv run lfdata map --check   # falla si algo de Biwenger quedó sin canonical_id
+uv run lfdata map --check   # falla si Biwenger o el eventing quedaron sin canonical_id
 uv run lfdata crosscheck sofascore-biwenger-minutes --out crosscheck.json
 ```
 
@@ -70,6 +82,7 @@ uv run lfdata ingest biwenger --competition la-liga --season 2026 --delta
 #                    en vez de recorrer la plantilla entera
 uv run lfdata ingest biwenger-rounds --competition la-liga --season 2026 --resume
 uv run lfdata backfill sofascore --competition la-liga --season 2026
+uv run lfdata curate sofascore-catalog   # refresca el catálogo con las alineaciones nuevas
 ```
 
 ### Semanal
@@ -79,7 +92,9 @@ uv run lfdata newcomers --competition la-liga --season 2026
 #    --dry-run        solo lista los fichajes detectados, sin descargar
 #    --max-newcomers  tope de fichajes resueltos por run (útil con histórico a medias)
 uv run lfdata ingest transfermarkt --competition la-liga --season 2026 --since-days 7
-uv run lfdata map --season 2026    # + revisar mappings/*-review.csv
+uv run lfdata curate sofascore-catalog     # por si newcomers trajo alineaciones nuevas
+uv run lfdata map --season 2026            # + revisar mappings/*-review.csv (Transfermarkt y SofaScore)
+uv run lfdata curate sofascore-canonical   # re-estampa el eventing con los mappings nuevos
 uv run lfdata map --check
 ```
 
