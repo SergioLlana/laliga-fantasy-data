@@ -8,6 +8,7 @@ Plataforma abierta de datos y proyecciones para fantasy de La Liga (Biwenger pri
 - **[PRODUCT.md](PRODUCT.md)** y **[docs/plan.md](docs/plan.md)** — qué ofrece el producto y el plan por fases.
 - **[docs/adr/](docs/adr/)** — las decisiones estructurales y su *porqué*. Un ADR que contradice lo que vas a hacer es una señal de que falta contexto: léelo antes.
 - **[README.md](README.md)** — instalación y todos los comandos del CLI con ejemplos.
+- **[docs/runbook.md](docs/runbook.md)** — cómo operar la base de datos: backfill de temporadas pasadas e incremental de la temporada en curso, con orden y cadencias.
 
 ## Convenciones que no se deducen del código
 

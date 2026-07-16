@@ -28,6 +28,11 @@ class _SofaModel(BaseModel):
 #
 # ``results`` mezcla tipos (player, team, event...). Solo interpretamos los de
 # tipo ``player``; su ``entity`` se valida aparte como :class:`SearchPlayer`.
+#
+# Ojo: ``search/all`` **no** publica la fecha de nacimiento. El campo
+# ``dateOfBirthTimestamp`` solo llega en los lineups y en la estadística por
+# evento, así que la búsqueda no basta como evidencia del matcher de identidad y
+# aquí no se modela ese campo (ver ADR 0001 y la ronda de matching de SofaScore).
 
 
 class SearchTeam(_SofaModel):
@@ -42,7 +47,6 @@ class SearchPlayer(_SofaModel):
     slug: str | None = None
     team: SearchTeam | None = None
     position: str | None = None
-    date_of_birth_timestamp: int | None = Field(alias="dateOfBirthTimestamp", default=None)
 
 
 class SearchResult(_SofaModel):
