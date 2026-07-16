@@ -40,10 +40,24 @@ from pathlib import Path
 import pandas as pd
 
 from lfdata.mappings import run_map
-from lfdata.mappings.store import BIWENGER, TRANSFERMARKT, MappingStore
-from lfdata.sources.http import HttpTransport, SourceHTTPError
+from lfdata.mappings.store import (
+    BIWENGER,
+    SOFASCORE_PLAYER_REVIEW_COLUMNS,
+    TRANSFERMARKT,
+    MappingStore,
+)
+from lfdata.sources.http import (
+    HttpTransport,
+    SourceHTTPError,
+    scrapeops_proxy_from_env,
+)
 from lfdata.sources.ingestion import IngestResult, PlayerFailure
-from lfdata.sources.sofascore import ingest_player
+from lfdata.sources.sofascore import ingest_player, resolve_identity_by_search
+from lfdata.sources.sofascore.client import (
+    PROXY_OVERFLOW,
+    WAIT_SECONDS,
+    SofaScoreClient,
+)
 from lfdata.sources.transfermarkt import ingest_clubs
 from lfdata.storage import Storage
 
@@ -57,10 +71,16 @@ TABLE = "newcomers"
 # fichaje.
 POINTS_TABLES = ("fantasy_points", "fantasy_round_points")
 
-# Estado de la descarga del historial, y marca de si hay que reintentarla.
+# Estado de la descarga del historial, y marca de si hay que reintentarla. Solo
+# ``descargado`` es terminal (identidad verificada + historial curado); el resto
+# se reintenta en el run siguiente.
 DOWNLOADED = "descargado"
 NO_HISTORY = "sin-historial"
 FAILED = "fallo"
+# La identidad de SofaScore no se pudo verificar (sin canónico de Biwenger todavía,
+# o la búsqueda es ambigua/discrepante): no se cura nada y se reintenta. Es lo que
+# evita fosilizar el historial de la persona equivocada (issue #81).
+NO_IDENTITY = "sin-identidad"
 
 # El registro dice quién llegó, a qué equipo y si su historial está descargado.
 # No guarda el id de SofaScore: los ids de cada fuente viven en los mappings
@@ -85,6 +105,9 @@ ALREADY = "fichajes ya registrados"
 WITH_HISTORY = "fichajes con historial descargado"
 IN_REVIEW = "fichajes encolados a revisión de mapping"
 DEFERRED = "fichajes aplazados al siguiente run (tope)"
+# Fichajes cuya descarga se aplaza porque su identidad de SofaScore no está
+# verificada: sin ella no se cura nada (issue #81, criterio de aceptación).
+DEFERRED_IDENTITY = "fichajes aplazados por identidad de SofaScore pendiente"
 
 # Anomalía: la fuente no tiene al jugador, así que no hay historial que curar.
 NO_PROFILE = "fichajes sin ficha en SofaScore"
@@ -99,6 +122,9 @@ class Newcomer:
     player_id: int
     name: str
     team_id: int | None
+    # Fecha de nacimiento de Biwenger (``YYYY-MM-DD`` o vacía): la evidencia con
+    # la que se verifica la identidad de SofaScore antes de bajar el historial.
+    birth_date: str = ""
 
 
 def detect_newcomers(storage: Storage, competition: str, season: int) -> list[Newcomer]:
@@ -117,17 +143,25 @@ def detect_newcomers(storage: Storage, competition: str, season: int) -> list[Ne
     if squad.empty:
         return []
 
+    has_birth = "birth_date" in squad.columns
     veterans = _players_with_points_before(storage, competition, season)
     newcomers = [
         Newcomer(
             player_id=int(row.id),
             name=str(row.name),
             team_id=None if pd.isna(row.team_id) else int(row.team_id),
+            birth_date=_birth_date(row) if has_birth else "",
         )
         for row in squad.itertuples()
         if not pd.isna(row.id) and int(row.id) not in veterans
     ]
     return sorted(newcomers, key=lambda n: n.player_id)
+
+
+def _birth_date(row) -> str:
+    """Fecha de nacimiento ISO de una fila de plantilla; vacía si no la tiene."""
+    value = getattr(row, "birth_date", None)
+    return "" if value is None or pd.isna(value) else str(value)[:10]
 
 
 def ingest_newcomers(
@@ -211,6 +245,11 @@ def ingest_newcomers(
     canonical_by_biwenger = MappingStore.canonical_by_source(store.players, BIWENGER)
     in_review = {str(v) for v in store.players_review["biwenger_id"]}
     result.stats[IN_REVIEW] = len(in_review & {str(n.player_id) for n in pending})
+    result.stats[DEFERRED_IDENTITY] = 0
+
+    # Un único transporte con su limitador de ritmo para todas las peticiones de
+    # SofaScore del run (búsqueda, ficha e historial), en vez de uno por fichaje.
+    sofascore_transport = sofascore_transport or _default_sofascore_transport()
 
     today = datetime.now(tz=UTC).date().isoformat()
     rows = []
@@ -224,6 +263,7 @@ def ingest_newcomers(
             mappings_dir=mappings_dir,
             transport=sofascore_transport,
             result=result,
+            today=today,
         )
         rows.append(
             {
@@ -246,7 +286,7 @@ def ingest_newcomers(
     result.stats[WITH_HISTORY] = sum(1 for row in rows if row["history"] == DOWNLOADED)
     logger.info(
         "newcomers %s %d: %d detectados, %d ya registrados, %d nuevos registrados "
-        "(%d con historial, %d en revisión de mapping)",
+        "(%d con historial, %d en revisión de mapping, %d aplazados por identidad)",
         competition,
         season,
         len(detected),
@@ -254,8 +294,17 @@ def ingest_newcomers(
         len(rows),
         result.stats[WITH_HISTORY],
         result.stats[IN_REVIEW],
+        result.stats[DEFERRED_IDENTITY],
     )
     return result
+
+
+def _default_sofascore_transport() -> HttpTransport:
+    """Transporte de SofaScore por defecto (impersonación + desbordo a ScrapeOps)."""
+    return HttpTransport(
+        wait_seconds=WAIT_SECONDS,
+        overflow_proxy=scrapeops_proxy_from_env(enabled=PROXY_OVERFLOW),
+    )
 
 
 def _resolve_identity(
@@ -343,32 +392,118 @@ def _download_history(
     *,
     store: MappingStore,
     mappings_dir: str,
-    transport: HttpTransport | None,
+    transport: HttpTransport,
     result: IngestResult,
+    today: str,
 ) -> str:
-    """Descarga de SofaScore el historial del fichaje; devuelve el estado.
+    """Verifica la identidad de SofaScore y **solo entonces** descarga el historial.
 
-    Se pide por su ID de SofaScore si la identidad ya lo tiene mapeado (llegó a la
-    plataforma por otra vía) y, si no, por nombre: es el caso normal de un fichaje.
-    Su ``canonical_id`` lo resuelve luego ``lfdata map`` desde el catálogo
-    ``sofascore_players`` y un re-estampado con ``lfdata curate sofascore-canonical``.
+    Primero identidad, después descarga: nunca «al primero que salga» (issue #81).
 
-    Que SofaScore no encuentre al jugador (un juvenil sin ficha) no es un fallo del
-    run: se registra como anomalía, el fichaje queda en ``sin-historial`` —lo que
-    la web mostrará como baseline de confianza baja— y el run siguiente reintenta.
+    1. **Ya mapeado o en el catálogo** — ``lfdata map`` (ejecutado en la fase de
+       identidad) ya colgó su id de SofaScore del canónico: se descarga por ID.
+    2. **Sin canónico** — su Transfermarkt sigue en revisión, así que no hay de qué
+       colgar la identidad de SofaScore: se aplaza (``sin-identidad``) sin gastar
+       peticiones y el run siguiente lo reintenta cuando la revisión se resuelva.
+    3. **Fuera del catálogo, con canónico** — se resuelve por ``search/all`` con una
+       única petición de verificación (:func:`_resolve_via_search`).
+
+    Ninguna fila entra en el eventing curado sin ``canonical_id`` verificado: el
+    mapping se aprueba **antes** de descargar, para que ``ingest_player`` lo estampe.
     """
-    query = _sofascore_id(store, canonical_id) or newcomer.name
+    sofascore_id = _sofascore_id(store, canonical_id)
+    if sofascore_id:
+        return _download_by_id(storage, newcomer, sofascore_id, mappings_dir, transport, result)
+    if not canonical_id:
+        return _defer_no_identity(
+            newcomer, result, "sin canónico de Biwenger (Transfermarkt en revisión)"
+        )
+    return _resolve_via_search(
+        storage, newcomer, canonical_id, store, mappings_dir, transport, result, today
+    )
+
+
+def _resolve_via_search(
+    storage: Storage,
+    newcomer: Newcomer,
+    canonical_id: str,
+    store: MappingStore,
+    mappings_dir: str,
+    transport: HttpTransport,
+    result: IngestResult,
+    today: str,
+) -> str:
+    """Resuelve por búsqueda la identidad de un fichaje fuera del catálogo.
+
+    Candidato único cuya fecha de nacimiento coincide con la de Biwenger: se
+    aprueba el mapping y se descarga por ID. Cero o varios candidatos, o fecha
+    discrepante: se encola a revisión con la evidencia y se aplaza, sin curar nada
+    ni gastar peticiones en verificar a ciegas.
+    """
+    client = SofaScoreClient(transport, storage.raw)
     try:
-        downloaded = ingest_player(storage, query, mappings_dir=mappings_dir, transport=transport)
-    except ValueError:
+        identity = resolve_identity_by_search(client, newcomer.name, newcomer.birth_date)
+    except SourceHTTPError as error:
         logger.warning(
-            "fichaje %s (biwenger %d): SofaScore no tiene ficha para %r, sin historial",
+            "fichaje %s (biwenger %d): HTTP %d al buscar su identidad, se reintentará",
             newcomer.name,
             newcomer.player_id,
-            query,
+            error.status,
+        )
+        result.failures.append(PlayerFailure(newcomer.name, error.url, error.status))
+        return FAILED
+
+    if identity.verified_id is not None:
+        verified = str(identity.verified_id)
+        if verified in MappingStore.approved_ids(store.players, SOFASCORE):
+            # El id ya cuelga de otro canónico: conflicto real, no se toca. A revisión.
+            _enqueue_review(store, newcomer, identity.candidates, "candidato-compartido")
+            return _defer_no_identity(
+                newcomer, result, "id de SofaScore ya mapeado a otro canónico"
+            )
+        # Se aprueba el mapping antes de descargar, para que ``ingest_player`` estampe
+        # el canónico en cada fila del eventing (ninguna fila sin canónico verificado).
+        store.add_player(canonical_id, [(SOFASCORE, verified)], method="auto", date=today)
+        store.save()
+        logger.info(
+            "fichaje %s (biwenger %d): identidad de SofaScore %s verificada por fecha "
+            "(%s), mapping aprobado",
+            newcomer.name,
+            newcomer.player_id,
+            verified,
+            newcomer.birth_date or "sin fecha",
+        )
+        return _download_by_id(storage, newcomer, verified, mappings_dir, transport, result)
+
+    if not identity.candidates:
+        logger.warning(
+            "fichaje %s (biwenger %d): SofaScore no tiene ficha de fútbol para %r, sin historial",
+            newcomer.name,
+            newcomer.player_id,
+            newcomer.name,
         )
         result.anomalies[NO_PROFILE] = result.anomalies.get(NO_PROFILE, 0) + 1
         return NO_HISTORY
+
+    _enqueue_review(store, newcomer, identity.candidates, identity.motivo)
+    return _defer_no_identity(
+        newcomer, result, f"búsqueda ambigua ({identity.motivo}), encolado a revisión"
+    )
+
+
+def _download_by_id(
+    storage: Storage,
+    newcomer: Newcomer,
+    sofascore_id: str,
+    mappings_dir: str,
+    transport: HttpTransport,
+    result: IngestResult,
+) -> str:
+    """Descarga el historial por un id de SofaScore ya verificado y lo cura."""
+    try:
+        downloaded = ingest_player(
+            storage, sofascore_id, mappings_dir=mappings_dir, transport=transport
+        )
     except SourceHTTPError as error:
         logger.warning(
             "fichaje %s (biwenger %d): HTTP %d al pedir su historial, se reintentará",
@@ -387,6 +522,56 @@ def _download_history(
         downloaded.rows.get("player_match_stats", 0),
     )
     return DOWNLOADED
+
+
+def _defer_no_identity(newcomer: Newcomer, result: IngestResult, reason: str) -> str:
+    """Aplaza un fichaje cuya identidad de SofaScore no se pudo verificar."""
+    logger.info(
+        "fichaje %s (biwenger %d): identidad de SofaScore sin verificar (%s), se aplaza",
+        newcomer.name,
+        newcomer.player_id,
+        reason,
+    )
+    result.stats[DEFERRED_IDENTITY] = result.stats.get(DEFERRED_IDENTITY, 0) + 1
+    return NO_IDENTITY
+
+
+def _enqueue_review(
+    store: MappingStore, newcomer: Newcomer, candidates: list[dict], motivo: str
+) -> None:
+    """Encola el fichaje a ``sofascore-review.csv`` con la evidencia de ambos lados.
+
+    Reutiliza el mismo fichero y formato que el matcher de #74: al rellenar la
+    ``decision`` a mano y re-ejecutar, ``lfdata map`` (que corre en la fase de
+    identidad del run siguiente) aplica el mapping y el historial baja por ID. Un
+    candidato con ``sofascore_id`` vacío deja al revisor completar el id él mismo.
+    """
+    biw_id = str(newcomer.player_id)
+    rows = [
+        {
+            "biwenger_id": biw_id,
+            "biwenger_name": newcomer.name,
+            "biwenger_team": "" if newcomer.team_id is None else str(newcomer.team_id),
+            "biwenger_birth_date": newcomer.birth_date or "",
+            "sofascore_id": candidate["id"],
+            "sofascore_name": candidate["name"],
+            "sofascore_team": candidate["team"],
+            "sofascore_birth_date": candidate["birth_date"],
+            "motivo": motivo,
+            "decision": "",
+        }
+        for candidate in candidates
+    ]
+    # Se reemplazan las filas previas de este fichaje para no acumular duplicados
+    # entre runs (el matcher no las regenera: el fichaje no está en el catálogo).
+    kept = store.players_review_sofascore[
+        store.players_review_sofascore["biwenger_id"].astype(str) != biw_id
+    ]
+    store.players_review_sofascore = pd.concat(
+        [kept, pd.DataFrame(rows, columns=SOFASCORE_PLAYER_REVIEW_COLUMNS)],
+        ignore_index=True,
+    )
+    store.save()
 
 
 def _sofascore_id(store: MappingStore, canonical_id: str) -> str | None:

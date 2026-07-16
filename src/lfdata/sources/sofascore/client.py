@@ -17,6 +17,7 @@ from lfdata.sources.sofascore.models import (
     EventsResponse,
     LineupsResponse,
     OverallStatisticsResponse,
+    PlayerProfileResponse,
     RatingsResponse,
     SearchResponse,
     SeasonsResponse,
@@ -70,6 +71,16 @@ class SofaScoreClient:
         url = f"{API_BASE}/search/all"
         payload = self._get(url, "search", _slug(query), params={"q": query})
         return self._validate(SearchResponse, payload, url)
+
+    def fetch_player(self, player_id: int) -> PlayerProfileResponse:
+        """Ficha del jugador (nombre, fecha de nacimiento): una petición barata.
+
+        Verifica la identidad de un fichaje sin ``sofascore_player_id`` mapeado
+        antes de gastar las decenas de peticiones del historial completo.
+        """
+        url = f"{API_BASE}/player/{player_id}"
+        payload = self._get(url, "player-profile", str(player_id))
+        return self._validate(PlayerProfileResponse, payload, url)
 
     def fetch_seasons(self, player_id: int) -> SeasonsResponse:
         """Torneos y temporadas disponibles del jugador (cualquier liga)."""

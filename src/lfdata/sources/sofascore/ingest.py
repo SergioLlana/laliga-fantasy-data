@@ -22,12 +22,15 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
 
 from lfdata.mappings import MappingStore
+from lfdata.mappings.matcher import birthdate_matches
+from lfdata.mappings.normalize import name_compatible
 from lfdata.sources.http import HttpTransport, SourceHTTPError, scrapeops_proxy_from_env
 from lfdata.sources.ingestion import IngestResult, PlayerFailure
 from lfdata.sources.sofascore.client import PROXY_OVERFLOW, WAIT_SECONDS, SofaScoreClient
@@ -38,6 +41,10 @@ logger = logging.getLogger(__name__)
 
 SOURCE = "sofascore"
 _CANONICAL_RE = re.compile(r"^p\d+$")
+
+# ``search/all`` mezcla deportes; solo el fútbol es candidato a un jugador de La
+# Liga (un homónimo de baloncesto se descarta por aquí, ver ADR 0001).
+FOOTBALL = "football"
 
 # Métricas de conteo por partido: SofaScore omite el campo cuando vale cero, así
 # que una ausencia (con el evento sí descargado) significa cero.
@@ -352,6 +359,67 @@ def _lineup_rows(
                 }
             )
     return rows
+
+
+@dataclass(frozen=True)
+class SearchIdentity:
+    """Resultado de resolver la identidad de SofaScore por búsqueda + fecha.
+
+    O ``verified_id`` (la fecha de nacimiento confirma a un candidato único de
+    fútbol: listo para descargar por ID) o una lista de ``candidates`` para
+    revisión con su ``motivo``. Nunca se descarga «al primero que salga».
+    """
+
+    verified_id: int | None
+    candidates: list[dict] = field(default_factory=list)
+    motivo: str = ""
+
+
+def resolve_identity_by_search(
+    client: SofaScoreClient, name: str, birth_date: str
+) -> SearchIdentity:
+    """Identidad de SofaScore de un fichaje fuera del catálogo, por ``search/all``.
+
+    Filtra la búsqueda a fútbol y a nombre compatible (misma norma que el
+    matcher). Con un único candidato, gasta **una** petición barata —la ficha
+    ``player/{id}``, que trae la fecha de nacimiento— para contrastarla con la de
+    Biwenger: solo si coincide se da por verificado. Con cero o varios candidatos
+    no verifica a ciegas y devuelve los candidatos para encolarlos a revisión.
+    """
+    football = [
+        player
+        for player in client.search_players(name).players()
+        if player.sport == FOOTBALL and name_compatible(name, player.name)
+    ]
+    candidates = [
+        {
+            "id": str(player.id),
+            "name": player.name,
+            "team": player.team.name if player.team else "",
+            "birth_date": "",
+        }
+        for player in football
+    ]
+    if not football:
+        return SearchIdentity(None, [], "sin-ficha")
+    if len(football) > 1:
+        return SearchIdentity(None, candidates, "varios-candidatos")
+
+    only = football[0]
+    profile_birth = _profile_birth_date(client, only.id)
+    candidates[0]["birth_date"] = profile_birth
+    if birthdate_matches(birth_date, profile_birth):
+        return SearchIdentity(only.id, candidates, "")
+    motivo = "fecha-discrepante" if birth_date and profile_birth else "sin-fecha-que-verificar"
+    return SearchIdentity(None, candidates, motivo)
+
+
+def _profile_birth_date(client: SofaScoreClient, player_id: int) -> str:
+    """Fecha de nacimiento ISO de la ficha del jugador; vacío si no la publica."""
+    timestamp = client.fetch_player(player_id).player.date_of_birth_timestamp
+    if timestamp is None:
+        return ""
+    return datetime.fromtimestamp(timestamp, tz=UTC).date().isoformat()
 
 
 def _resolve_player(
