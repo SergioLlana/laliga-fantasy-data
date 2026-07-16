@@ -69,6 +69,8 @@ uv run ruff check .        # lint
 uv run ruff format .       # formateo
 ```
 
+El orden del backfill de temporadas pasadas y las cadencias de actualización durante la temporada están en [`docs/runbook.md`](docs/runbook.md).
+
 La documentación del proyecto vive en `docs/`: el plan general en `docs/plan.md`, los planes de implementación en `docs/implementation/` y las decisiones de arquitectura en `docs/adr/`. El lenguaje del dominio está en `CONTEXT.md`.
 
 ## Infraestructura

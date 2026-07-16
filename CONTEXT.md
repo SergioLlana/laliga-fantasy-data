@@ -43,6 +43,14 @@ _Avoid_: golden record, master player
 La correspondencia aprobada entre el identificador de un jugador o equipo en una fuente y su identidad canónica.
 _Avoid_: crosswalk, alias
 
+**Backfill**:
+La carga de temporadas ya cerradas (anteriores a la actual), inmutables: se lanza una vez por temporada y se reanuda si se corta, nunca se refresca.
+_Avoid_: carga histórica, carga inicial (el backfill de una liga de origen puede ocurrir en cualquier momento)
+
+**Incremental**:
+La actualización recurrente de la temporada en curso durante la temporada: por jornada, semanal o al cierre, según la tabla.
+_Avoid_: refresh diario (la cadencia no es única), pipeline (ese es el mecanismo que lo ejecutará, no la operación)
+
 **Modelo de minutos**:
 El modelo que predice cuántos minutos jugará un jugador en una jornada (titularidad, rotación, lesión).
 
