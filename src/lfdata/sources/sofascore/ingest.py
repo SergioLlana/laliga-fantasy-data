@@ -342,7 +342,11 @@ def _lineup_rows(
 def _resolve_player(
     client: SofaScoreClient, query: str, store: MappingStore
 ) -> tuple[int, str | None, str | None, str | None]:
-    """Resuelve ``query`` a (id SofaScore, nombre, club, fecha nacimiento ISO).
+    """Resuelve ``query`` a (id SofaScore, nombre, club, fecha de nacimiento).
+
+    La fecha de nacimiento siempre sale ``None``: ``search/all`` no la publica (ver
+    :class:`~lfdata.sources.sofascore.models.SearchPlayer`); la identidad se verifica
+    luego contra el catálogo, no con la búsqueda.
 
     - ``canonical_id`` (``p\\d+``): busca su id de SofaScore en los mappings
       aprobados; si no lo tiene, es un error (no hay a quién descargar).
@@ -367,12 +371,9 @@ def _resolve_player(
     if not players:
         raise ValueError(f"SofaScore no devolvió ningún jugador para {query!r}.")
     best = players[0]
-    dob = (
-        datetime.fromtimestamp(best.date_of_birth_timestamp, tz=UTC).date().isoformat()
-        if best.date_of_birth_timestamp is not None
-        else None
-    )
-    return best.id, best.name, (best.team.name if best.team else None), dob
+    # search/all no publica la fecha de nacimiento (solo llega en los lineups y en
+    # la estadística por evento), así que aquí no hay fecha con la que desempatar.
+    return best.id, best.name, (best.team.name if best.team else None), None
 
 
 def _event_stats(
