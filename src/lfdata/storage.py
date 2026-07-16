@@ -159,10 +159,30 @@ def _partition_date(segment: str) -> date | None:
 
 
 class RawStore:
-    """Respuestas de las fuentes tal cual llegan, antes de interpretarlas."""
+    """Respuestas de las fuentes tal cual llegan, antes de interpretarlas.
+
+    Descubrir la descarga más reciente de un fichero exige enumerar el prefijo
+    ``raw/{source}/{dataset}/`` entero, y curar una tabla desde raw lo repite una
+    vez por jugador y por dataset. Como el prefijo no cambia dentro de un run
+    (salvo por lo que la propia store escribe), :meth:`_list_dataset` cachea el
+    listado por ``(source, dataset)``: seis enumeraciones por run en vez de seis
+    por jugador (issue #72). :meth:`save` mantiene el caché en sync para que un
+    fichero recién escrito sea visible sin re-listar; el caché solo vive lo que
+    dura el proceso, que es el único que escribe en ese prefijo.
+    """
 
     def __init__(self, backend: StorageBackend) -> None:
         self._backend = backend
+        self._listing: dict[tuple[str, str], list[str]] = {}
+
+    def _list_dataset(self, source: str, dataset: str) -> list[str]:
+        """Claves bajo ``raw/{source}/{dataset}/``, cacheadas por dataset."""
+        cache_key = (source, dataset)
+        cached = self._listing.get(cache_key)
+        if cached is None:
+            cached = self._backend.list_keys(f"raw/{source}/{dataset}/")
+            self._listing[cache_key] = cached
+        return cached
 
     def save(
         self,
@@ -179,6 +199,11 @@ class RawStore:
             f"raw/{source}/{dataset}/fecha_descarga={download_date.isoformat()}/{name}.{extension}"
         )
         self._backend.write_bytes(key, payload)
+        # Mantén el caché en sync solo si ya está poblado: una entrada presente
+        # representa el listado completo del prefijo, y debe seguir haciéndolo.
+        cached = self._listing.get((source, dataset))
+        if cached is not None and key not in cached:
+            cached.append(key)
         return key
 
     def last_download_date(
@@ -203,7 +228,7 @@ class RawStore:
         prefix = f"raw/{source}/{dataset}/"
         suffix = f".{extension}"
         latest: dict[str, tuple[date, str]] = {}
-        for key in self._backend.list_keys(prefix):
+        for key in self._list_dataset(source, dataset):
             if not key.endswith(suffix):
                 continue
             rest = key[len(prefix) :]
@@ -240,7 +265,7 @@ class RawStore:
         prefix = f"raw/{source}/{dataset}/"
         suffix = f"/{name}.{extension}"
         found: list[tuple[date, str]] = []
-        for key in self._backend.list_keys(prefix):
+        for key in self._list_dataset(source, dataset):
             if not key.endswith(suffix):
                 continue
             partition = key[len(prefix) :].split("/", 1)[0]
