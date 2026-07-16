@@ -14,8 +14,10 @@ import pytest
 
 from lfdata.cli import main
 from lfdata.newcomers import (
+    DEFERRED_IDENTITY,
     DOWNLOADED,
     NO_HISTORY,
+    NO_IDENTITY,
     TABLE,
     detect_newcomers,
     ingest_newcomers,
@@ -32,7 +34,11 @@ BIWENGER_VETERAN = 1
 BIWENGER_TEAM = 10
 TM_CLUB = 2497
 TM_FORES = 709380
+SOFASCORE_FORES = 1086128
 SEASON = 2026
+# La misma fecha en la plantilla de Biwenger y en la ficha de SofaScore
+# (player-1086128.json): es lo que verifica la identidad antes de descargar.
+FORES_BIRTH = "2002-01-16"
 
 
 class RoutingTransport:
@@ -74,6 +80,9 @@ def sofascore_routes(search: bytes | None = None) -> dict[str, bytes]:
         "unique-tournament/54/season/62048/statistics/overall": fixture("overall-54-62048.json"),
         "unique-tournament/54/season/62048/ratings": fixture("ratings-54-62048.json"),
         "/event/": fixture("event-player-stats.json"),
+        # La ficha (player/{id} a secas) va la última: su aguja es subcadena de las
+        # rutas player/{id}/... de arriba, que la capturan antes por su ruta propia.
+        "player/1086128": fixture("player-1086128.json"),
     }
 
 
@@ -101,8 +110,18 @@ def storage(tmp_path: Path) -> Storage:
     storage = Storage(f"file://{tmp_path / 'data'}")
     squad = pd.DataFrame(
         [
-            {"id": BIWENGER_VETERAN, "name": "Veterano", "team_id": BIWENGER_TEAM},
-            {"id": BIWENGER_FORES, "name": "Álex Forés", "team_id": BIWENGER_TEAM},
+            {
+                "id": BIWENGER_VETERAN,
+                "name": "Veterano",
+                "team_id": BIWENGER_TEAM,
+                "birth_date": "1990-05-01",
+            },
+            {
+                "id": BIWENGER_FORES,
+                "name": "Álex Forés",
+                "team_id": BIWENGER_TEAM,
+                "birth_date": FORES_BIRTH,
+            },
         ]
     )
     storage.curated.write_table("biwenger_players", squad, partition={"competition": "la-liga"})
@@ -223,13 +242,22 @@ def test_newcomer_ends_up_with_curated_history_without_intervention(
 
     result = run(storage, mappings, sofascore, RoutingTransport(transfermarkt_routes()))
 
-    # Historial curado: sus partidos de SofaScore, en las dos ligas por las que ha
-    # pasado. Las filas llevan su id de SofaScore; el enlace al ID canónico lo
-    # resuelve luego `lfdata map` desde el catálogo sofascore_players y un
-    # re-estampado con `lfdata curate sofascore-canonical`.
+    # Identidad primero: al no tener mapping de SofaScore, se resuelve por búsqueda y
+    # se **verifica con la fecha de nacimiento** (una petición a la ficha player/{id})
+    # antes de descargar. La verificación aprueba el mapping, así que el historial se
+    # cura ya con el canónico estampado en cada fila (ninguna fila sin canónico).
     matches = storage.curated.read_table("player_match_stats")
     assert not matches.empty
-    assert set(matches["sofascore_player_id"]) == {1086128}
+    assert set(matches["sofascore_player_id"]) == {SOFASCORE_FORES}
+    assert (matches["canonical_id"] == "p00001").all()
+
+    approved = pd.read_csv(mappings / "players.csv", dtype=str)
+    sofascore_rows = approved[approved["fuente"] == "sofascore"]
+    assert list(sofascore_rows["id_en_fuente"]) == [str(SOFASCORE_FORES)]
+    assert list(sofascore_rows["canonical_id"]) == ["p00001"]
+
+    # La ficha se pidió una sola vez (verificación barata), no el historial a ciegas.
+    assert sum(1 for url in sofascore.urls if url.endswith(f"player/{SOFASCORE_FORES}")) == 1
 
     # Y su registro de fichaje, con el historial marcado como descargado.
     registered = storage.curated.read_table(TABLE)
@@ -256,12 +284,14 @@ def test_transfermarkt_refresh_covers_only_the_arriving_club(
     assert not storage.curated.read_table("transfermarkt_players").empty
 
 
-def test_doubtful_mapping_is_enqueued_and_the_run_survives(
+def test_newcomer_without_canonical_is_deferred_not_downloaded(
     storage: Storage, mappings: Path
 ) -> None:
-    # Sin mapping previo: el matcher no puede resolver al fichaje por sí solo
-    # (la plantilla de Transfermarkt le ofrece varios candidatos), así que lo
-    # encola a revisión. El run sigue y su historial se descarga igualmente.
+    # Sin mapping previo el matcher no resuelve al fichaje por sí solo (la plantilla
+    # de Transfermarkt le ofrece varios candidatos) y lo encola a revisión: se queda
+    # sin canónico. Sin canónico no hay de qué colgar la identidad de SofaScore, así
+    # que **no se descarga nada** —esto es lo que evita fosilizar el historial
+    # equivocado (issue #81)— y el fichaje se aplaza al run siguiente.
     result = run(
         storage,
         mappings,
@@ -272,30 +302,63 @@ def test_doubtful_mapping_is_enqueued_and_the_run_survives(
     review = pd.read_csv(mappings / "players-review.csv", dtype=str)
     assert str(BIWENGER_FORES) in set(review["biwenger_id"])
     assert result.stats["fichajes encolados a revisión de mapping"] == 1
+    assert result.stats[DEFERRED_IDENTITY] == 1
 
     registered = storage.curated.read_table(TABLE)
-    assert list(registered["history"]) == [DOWNLOADED]
+    assert list(registered["history"]) == [NO_IDENTITY]
     assert list(registered["canonical_id"]) == [""]
-    assert not storage.curated.read_table("player_match_stats").empty
+    with pytest.raises(FileNotFoundError):
+        storage.curated.read_table("player_match_stats")
 
 
-def test_unmapped_sofascore_player_leaves_empty_canonical(storage: Storage, mappings: Path) -> None:
+def test_ambiguous_search_is_enqueued_to_sofascore_review(storage: Storage, mappings: Path) -> None:
+    # El fichaje ya tiene canónico (Transfermarkt resuelto) pero no está en el
+    # catálogo de SofaScore, y su búsqueda devuelve **varios** candidatos de fútbol
+    # con nombre compatible: no se verifica a ciegas. Se encola a revisión con la
+    # evidencia y se aplaza; al rellenar la `decision` bajará por ID mapeado.
     approve_player(mappings)
+    ambiguous = (SOFASCORE_FIXTURES / "search-ambiguous.json").read_bytes()
+    routes = sofascore_routes(search=ambiguous)
 
-    run(
-        storage,
-        mappings,
-        RoutingTransport(sofascore_routes()),
-        RoutingTransport(transfermarkt_routes()),
+    result = run(
+        storage, mappings, RoutingTransport(routes), RoutingTransport(transfermarkt_routes())
     )
 
-    # El historial se cura con el id de SofaScore pero sin canónico: la ingesta ya
-    # no escribe un fichero de revisión propio (lo resuelve `lfdata map` sobre el
-    # catálogo sofascore_players, no un encolado a ciegas por nombre).
-    matches = storage.curated.read_table("player_match_stats")
-    assert set(matches["sofascore_player_id"]) == {1086128}
-    assert (matches["canonical_id"] == "").all()
-    assert not (mappings / "sofascore-review.csv").exists()
+    assert list(storage.curated.read_table(TABLE)["history"]) == [NO_IDENTITY]
+    assert result.stats[DEFERRED_IDENTITY] == 1
+    with pytest.raises(FileNotFoundError):
+        storage.curated.read_table("player_match_stats")
+
+    review = pd.read_csv(mappings / "sofascore-review.csv", dtype=str)
+    assert set(review["biwenger_id"]) == {str(BIWENGER_FORES)}
+    assert len(review) == 2  # los dos homónimos de fútbol, para que el revisor elija
+    assert (review["motivo"] == "varios-candidatos").all()
+
+
+def test_discrepant_birthdate_homonym_is_not_downloaded(storage: Storage, mappings: Path) -> None:
+    # Candidato único de fútbol, pero su fecha de nacimiento no cuadra con la de
+    # Biwenger: es un homónimo. Se verifica con **una** petición y no se descarga el
+    # historial completo; se encola a revisión y se aplaza (criterio de aceptación).
+    approve_player(mappings)
+    other_birth = (SOFASCORE_FIXTURES / "player-1086128-other-birth.json").read_bytes()
+    routes = {**sofascore_routes(), "player/1086128": other_birth}
+    sofascore = RoutingTransport(routes)
+
+    result = run(storage, mappings, sofascore, RoutingTransport(transfermarkt_routes()))
+
+    assert list(storage.curated.read_table(TABLE)["history"]) == [NO_IDENTITY]
+    assert result.stats[DEFERRED_IDENTITY] == 1
+    with pytest.raises(FileNotFoundError):
+        storage.curated.read_table("player_match_stats")
+
+    # Se pidió la ficha (una petición de verificación) pero **no** las temporadas ni
+    # los eventos del historial.
+    assert any(url.endswith(f"player/{SOFASCORE_FORES}") for url in sofascore.urls)
+    assert not any("statistics/seasons" in url for url in sofascore.urls)
+
+    review = pd.read_csv(mappings / "sofascore-review.csv", dtype=str)
+    assert list(review["biwenger_id"]) == [str(BIWENGER_FORES)]
+    assert list(review["motivo"]) == ["fecha-discrepante"]
 
 
 def test_player_without_sofascore_profile_is_recorded_and_retried(
@@ -332,17 +395,22 @@ def test_sofascore_failure_does_not_abort_the_run(storage: Storage, mappings: Pa
     assert [f.status for f in result.failures] == [503]
 
 
-def test_team_without_mapping_still_gets_the_history(storage: Storage, tmp_path: Path) -> None:
-    # Equipo recién ascendido, aún sin mapping: no hay plantilla de Transfermarkt
-    # que refrescar, pero el fichaje no se queda sin historial por eso.
+def test_newcomer_without_team_mapping_is_deferred(storage: Storage, tmp_path: Path) -> None:
+    # Equipo recién ascendido, aún sin mapping: no hay plantilla de Transfermarkt que
+    # refrescar, así que el fichaje no obtiene canónico y su identidad de SofaScore
+    # no se puede colgar de nada. Se aplaza sin gastar peticiones (ni una a SofaScore)
+    # y el run siguiente lo reintenta cuando el equipo se mapee.
     empty_mappings = tmp_path / "mappings-vacios"
     empty_mappings.mkdir()
     transfermarkt = RoutingTransport(transfermarkt_routes())
+    sofascore = RoutingTransport(sofascore_routes())
 
-    result = run(storage, empty_mappings, RoutingTransport(sofascore_routes()), transfermarkt)
+    result = run(storage, empty_mappings, sofascore, transfermarkt)
 
     assert transfermarkt.urls == []
-    assert list(storage.curated.read_table(TABLE)["history"]) == [DOWNLOADED]
+    assert sofascore.urls == []  # sin canónico ni se busca: no se verifica a ciegas
+    assert list(storage.curated.read_table(TABLE)["history"]) == [NO_IDENTITY]
+    assert result.stats[DEFERRED_IDENTITY] == 1
     assert result.rows[TABLE] == 1
 
 
@@ -373,14 +441,20 @@ def test_max_newcomers_defers_the_rest_to_the_next_run(storage: Storage, mapping
         "biwenger_players",
         pd.DataFrame(
             [
-                {"id": BIWENGER_FORES, "name": "Álex Forés", "team_id": BIWENGER_TEAM},
-                {"id": 3, "name": "Otro fichaje", "team_id": BIWENGER_TEAM},
+                {
+                    "id": BIWENGER_FORES,
+                    "name": "Álex Forés",
+                    "team_id": BIWENGER_TEAM,
+                    "birth_date": FORES_BIRTH,
+                },
+                {"id": 3, "name": "Otro fichaje", "team_id": BIWENGER_TEAM, "birth_date": ""},
             ]
         ),
         partition={"competition": "la-liga"},
     )
     sofascore = RoutingTransport(sofascore_routes())
 
+    approve_player(mappings)
     result = run(
         storage,
         mappings,
@@ -391,7 +465,9 @@ def test_max_newcomers_defers_the_rest_to_the_next_run(storage: Storage, mapping
 
     assert result.stats["fichajes detectados"] == 2
     assert result.stats["fichajes aplazados al siguiente run (tope)"] == 1
-    assert list(storage.curated.read_table(TABLE)["player_id"]) == [BIWENGER_FORES]
+    registered = storage.curated.read_table(TABLE)
+    assert list(registered["player_id"]) == [BIWENGER_FORES]
+    assert list(registered["history"]) == [DOWNLOADED]
 
 
 def test_dry_run_detects_without_downloading(storage: Storage, mappings: Path) -> None:

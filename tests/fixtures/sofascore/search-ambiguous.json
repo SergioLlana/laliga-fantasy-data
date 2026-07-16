@@ -1,0 +1,14 @@
+{"results": [
+  {"type": "player", "score": 1598.6, "entity": {
+    "id": 1086128, "name": "Álex Forés", "slug": "alex-fores", "position": "F",
+    "team": {"id": 2819, "name": "Villarreal", "slug": "villarreal",
+      "sport": {"id": 1, "slug": "football", "name": "Football"}}}},
+  {"type": "player", "score": 812.4, "entity": {
+    "id": 2200001, "name": "Álex Forés", "slug": "alex-fores-2", "position": "M",
+    "team": {"id": 2856, "name": "Levante", "slug": "levante",
+      "sport": {"id": 1, "slug": "football", "name": "Football"}}}},
+  {"type": "player", "score": 30.1, "entity": {
+    "id": 1540636, "name": "Álex Forés", "slug": "alex-fores-hoops", "position": "G",
+    "team": {"id": 377785, "name": "Forestville Eagles", "slug": "forestville-eagles",
+      "sport": {"id": 2, "slug": "basketball", "name": "Basketball"}}}}
+]}

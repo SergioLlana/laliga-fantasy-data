@@ -26,19 +26,27 @@ class _SofaModel(BaseModel):
 
 # --- Búsqueda: search/all?q= ------------------------------------------------
 #
-# ``results`` mezcla tipos (player, team, event...). Solo interpretamos los de
-# tipo ``player``; su ``entity`` se valida aparte como :class:`SearchPlayer`.
+# ``results`` mezcla tipos (player, team, event...) **y deportes** (fútbol,
+# baloncesto...). Solo interpretamos los de tipo ``player``; su ``entity`` se
+# valida aparte como :class:`SearchPlayer`. El deporte llega colgado del equipo
+# (``entity.team.sport``): un homónimo de otro deporte se filtra por ahí.
 #
 # Ojo: ``search/all`` **no** publica la fecha de nacimiento. El campo
-# ``dateOfBirthTimestamp`` solo llega en los lineups y en la estadística por
-# evento, así que la búsqueda no basta como evidencia del matcher de identidad y
-# aquí no se modela ese campo (ver ADR 0001 y la ronda de matching de SofaScore).
+# ``dateOfBirthTimestamp`` solo llega en los lineups, en la estadística por evento
+# y en la ficha del jugador (``player/{id}``), así que la búsqueda no basta como
+# evidencia del matcher de identidad y aquí no se modela ese campo (ver ADR 0001).
+
+
+class SearchSport(_SofaModel):
+    slug: str | None = None
+    name: str | None = None
 
 
 class SearchTeam(_SofaModel):
     id: int
     name: str
     slug: str | None = None
+    sport: SearchSport | None = None
 
 
 class SearchPlayer(_SofaModel):
@@ -47,6 +55,11 @@ class SearchPlayer(_SofaModel):
     slug: str | None = None
     team: SearchTeam | None = None
     position: str | None = None
+
+    @property
+    def sport(self) -> str | None:
+        """Deporte del jugador (``football``, ``basketball``...), o ``None``."""
+        return self.team.sport.slug if self.team and self.team.sport else None
 
 
 class SearchResult(_SofaModel):
@@ -60,6 +73,23 @@ class SearchResponse(_SofaModel):
     def players(self) -> list[SearchPlayer]:
         """Solo las entidades de tipo ``player``, ya validadas."""
         return [SearchPlayer.model_validate(r.entity) for r in self.results if r.type == "player"]
+
+
+# --- Ficha del jugador: player/{id} -----------------------------------------
+#
+# Perfil del jugador con su ``dateOfBirthTimestamp``. Es la petición barata que
+# verifica la identidad de un fichaje antes de bajarle el historial completo: una
+# sola llamada trae la fecha con la que se contrasta la de Biwenger.
+
+
+class PlayerProfile(_SofaModel):
+    id: int | None = None
+    name: str | None = None
+    date_of_birth_timestamp: int | None = Field(alias="dateOfBirthTimestamp", default=None)
+
+
+class PlayerProfileResponse(_SofaModel):
+    player: PlayerProfile = Field(default_factory=PlayerProfile)
 
 
 # --- Temporadas del jugador: player/{id}/statistics/seasons -----------------
