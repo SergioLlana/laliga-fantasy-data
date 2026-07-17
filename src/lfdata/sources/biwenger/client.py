@@ -71,6 +71,11 @@ class BiwengerClient:
         "2025/2026 season"). Esa traducción vive aquí y solo afecta a la URL: la
         partición y el nombre del raw se quedan con el año de inicio, para que
         ``season=2025`` sea 2025/26 en todo el almacenamiento.
+
+        Ojo: ``season`` solo aplica a ``reports``. El campo ``prices`` lo ignora
+        y devuelve siempre la ventana móvil de los últimos ~366 días (#89), así
+        que no hay histórico de precios de temporadas pasadas por esta vía; el
+        curado deriva la temporada de cada precio de su fecha.
         """
         if competition not in COMPETITIONS:
             raise ValueError(f"Competición desconocida: {competition!r} (usa {COMPETITIONS})")

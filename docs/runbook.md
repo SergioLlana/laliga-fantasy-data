@@ -30,6 +30,8 @@ Para cada temporada `N` de 2021 a 2025, en este orden:
 uv run lfdata ingest biwenger --competition la-liga --season N --resume
 #    --resume        salta a los jugadores con report ya en raw/ (la temporada
 #                    pasada es inmutable: reanudar sin re-descargar)
+#    Nota: los precios NO tienen histórico (la API solo sirve los últimos ~366
+#    días, #89): el backfill de una temporada pasada cura puntos pero 0 precios.
 
 # 2. Puntos por jornada de todos los jugadores (histórico sin sesgo de plantilla)
 uv run lfdata ingest biwenger-rounds --competition la-liga --season N --resume

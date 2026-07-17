@@ -17,7 +17,7 @@ import io
 import os
 import tempfile
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import suppress
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -331,7 +331,7 @@ class CuratedStore:
         table: str,
         df: pd.DataFrame,
         *,
-        key: str = "player_id",
+        key: str | Sequence[str] = "player_id",
         partition: Mapping[str, str] | None = None,
     ) -> str:
         """Actualiza filas por ``key`` sin tocar al resto de la partición.
@@ -341,12 +341,19 @@ class CuratedStore:
         mismo lote deja la tabla igual) y hace la ingesta reanudable: un run
         parcial refresca solo esos ``key`` sin borrar a los demás. Sobre una
         partición vacía equivale a :meth:`write_table`.
+
+        ``key`` admite varias columnas. Con clave compuesta el upsert es aditivo
+        por fila, no por entidad: sirve para series (``biwenger_prices`` usa
+        ``(player_id, date)``) donde un lote que trae una ventana parcial debe
+        añadir fechas sin borrar las que ya no aparecen en ella.
         """
+        keys = [key] if isinstance(key, str) else list(key)
         table_key = self._table_key(table, partition)
         incoming = df.drop(columns=[col for col in (partition or {}) if col in df.columns])
         if self._backend.exists(table_key):
             existing = pd.read_parquet(io.BytesIO(self._backend.read_bytes(table_key)))
-            kept = existing[~existing[key].isin(set(incoming[key]))]
+            incoming_index = pd.MultiIndex.from_frame(incoming[keys])
+            kept = existing[~pd.MultiIndex.from_frame(existing[keys]).isin(incoming_index)]
             combined = pd.concat([kept, incoming], ignore_index=True)
         else:
             combined = incoming

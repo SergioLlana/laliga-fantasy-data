@@ -22,7 +22,7 @@ Los términos del dominio están definidos en [CONTEXT.md](../CONTEXT.md) y las 
 
 | Fuente | Qué aporta | Cómo se accede |
 |---|---|---|
-| Biwenger | Jugadores, precios diarios (histórico por temporada), puntos por partido en los cinco sistemas de puntuación, minutos jugados y nota SofaScore por partido, jornadas | API no oficial (JSON), verificada: acepta `season=YYYY` para históricos |
+| Biwenger | Jugadores, precios diarios (solo los últimos ~366 días: la API ignora `season` en precios, #89), puntos por partido en los cinco sistemas de puntuación, minutos jugados y nota SofaScore por partido, jornadas | API no oficial (JSON), verificada: acepta `season=YYYY` para históricos de puntos |
 | SofaScore | Nota y estadísticas por jugador-partido (115 campos por temporada), en La Liga y el resto de ligas, incluidas categorías inferiores | API no oficial (JSON); requiere impersonación de Chrome (curl-cffi) |
 | Transfermarkt | Valor de mercado, traspasos y cesiones, datos biográficos, disponibilidad por partido e historial de lesiones | Endpoints JSON internos (`ceapi`) para valores, traspasos y rendimiento/disponibilidad (`performance-game`); HTML para búsqueda, perfil y lesiones |
 | FotMob (verificado 2026-07-07) | Redundancia de SofaScore: estadísticas por jugador-partido, con nota propia | API no oficial (JSON); requiere impersonación de Chrome |
@@ -126,7 +126,7 @@ La separación clave para soportar más plataformas de fantasy en el futuro: nad
 
 Cada paso deja algo que funciona de principio a fin. Cada uno tiene su plan de implementación detallado en [docs/implementation/](./implementation/):
 
-1. **Esqueleto + ingesta de Biwenger**: paquete, CLI, transporte HTTP, descarga de la temporada actual a `raw/` y primeras tablas curadas (jugadores, precios, puntos). Verificado (2026-07-07): la API expone los cinco sistemas de puntuación por jugador-partido, minutos, nota SofaScore e histórico de precios por temporada vía `season=YYYY`.
+1. **Esqueleto + ingesta de Biwenger**: paquete, CLI, transporte HTTP, descarga de la temporada actual a `raw/` y primeras tablas curadas (jugadores, precios, puntos). Verificado (2026-07-07): la API expone los cinco sistemas de puntuación por jugador-partido, minutos y nota SofaScore por temporada vía `season=YYYY`. Los precios, en cambio, ignoran `season`: solo existe la ventana móvil de los últimos ~366 días y el histórico se acumula hacia delante con la ingesta periódica (#89).
 2. **Mappings**: ingesta de Transfermarkt (La Liga), matching automático, primer ciclo de revisión manual.
 3. **SofaScore + backfill**: estadísticas por jugador-partido, 5 temporadas de La Liga, y verificación de FotMob como redundancia.
 4. **Modelos**: referencia simple, luego modelo de minutos y modelo de rendimiento con validación temporal.
