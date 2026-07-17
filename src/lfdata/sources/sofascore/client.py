@@ -34,6 +34,22 @@ WAIT_SECONDS = 3.0
 TOURNAMENTS = {"la-liga": 8, "segunda-division": 54}
 COMPETITION_BY_TOURNAMENT = {ut_id: slug for slug, ut_id in TOURNAMENTS.items()}
 
+# Copa del Rey y competiciones UEFA (issue #68): se ingieren **solo** para la
+# densidad de calendario y los minutos entre semana de los equipos de La Liga. Su
+# raw vive en datasets propios (``cup-events``/``cup-lineups``, ver ``cups.py``)
+# para no mezclarse con el eventing de La Liga ni con el catálogo de identidad, que
+# solo cubre ``TOURNAMENTS``. Ids de ``unique-tournament`` de SofaScore.
+CALENDAR_TOURNAMENTS = {
+    "copa-del-rey": 329,
+    "champions-league": 7,
+    "europa-league": 679,
+    "conference-league": 17015,
+}
+# Slug ↔ id para todo lo backfilleable (identidad + calendario): choices del CLI y
+# resolución del año a id de temporada salen de aquí.
+ALL_TOURNAMENTS = {**TOURNAMENTS, **CALENDAR_TOURNAMENTS}
+COMPETITION_BY_ANY_TOURNAMENT = {ut_id: slug for slug, ut_id in ALL_TOURNAMENTS.items()}
+
 # SofaScore veta por huella TLS (403 con curl normal) y puede cortar por IP ante
 # volumen. Se permite desbordar a ScrapeOps (rota IPs y resuelve Cloudflare) solo
 # tras confirmar el bloqueo; hasta entonces va directo con curl-cffi (gratis). El
@@ -122,16 +138,32 @@ class SofaScoreClient:
         payload = self._get(url, "tournament-seasons", str(tournament_id))
         return self._validate(TournamentSeasonsResponse, payload, url)
 
-    def fetch_events(self, tournament_id: int, season_id: int, page: int = 0) -> EventsResponse:
-        """Una página del calendario de partidos pasados de una liga-temporada."""
+    def fetch_events(
+        self,
+        tournament_id: int,
+        season_id: int,
+        page: int = 0,
+        *,
+        dataset: str = "tournament-events",
+    ) -> EventsResponse:
+        """Una página del calendario de partidos pasados de una liga-temporada.
+
+        ``dataset`` elige el prefijo raw: por defecto ``tournament-events`` (La Liga y
+        Segunda, que alimentan identidad y eventing); el backfill de copas lo apunta a
+        ``cup-events`` para no contaminar esos datasets (issue #68).
+        """
         url = f"{API_BASE}/unique-tournament/{tournament_id}/season/{season_id}/events/last/{page}"
-        payload = self._get(url, "tournament-events", f"{tournament_id}-{season_id}-last-{page}")
+        payload = self._get(url, dataset, f"{tournament_id}-{season_id}-last-{page}")
         return self._validate(EventsResponse, payload, url)
 
-    def fetch_lineups(self, event_id: int) -> LineupsResponse:
-        """Alineaciones de un partido con la estadística de evento por jugador."""
+    def fetch_lineups(self, event_id: int, *, dataset: str = "event-lineups") -> LineupsResponse:
+        """Alineaciones de un partido con la estadística de evento por jugador.
+
+        ``dataset`` por defecto ``event-lineups``; el backfill de copas lo apunta a
+        ``cup-lineups`` (issue #68).
+        """
         url = f"{API_BASE}/event/{event_id}/lineups"
-        payload = self._get(url, "event-lineups", str(event_id))
+        payload = self._get(url, dataset, str(event_id))
         return self._validate(LineupsResponse, payload, url)
 
 

@@ -8,6 +8,7 @@ docs/experiments/2026-07-07-alex-fores.md.
 from datetime import date
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from lfdata.cli import main
@@ -16,12 +17,15 @@ from lfdata.sources.transfermarkt import (
     SourceFormatError,
     TransfermarktClient,
     ingest_clubs,
+    ingest_squad_values,
     ingest_squads,
 )
 from lfdata.sources.transfermarkt.parse import (
+    _tm_market_value,
     availability_rows,
     classify_transfer,
     market_value_rows,
+    parse_competition_clubs,
     parse_injuries,
     parse_profile,
     transfer_rows,
@@ -101,6 +105,117 @@ def test_competition_clubs_raw_names_include_season(storage: Storage, tmp_path: 
     client.fetch_competition_clubs("la-liga", season=2025)
     names = sorted(p.name for p in raw_files(tmp_path) if "competition-clubs" in p.as_posix())
     assert names == ["ES1-saison-2024.html", "ES1-saison-2025.html"]
+
+
+# --- valor de plantilla por club (issue #69) ---------------------------------
+
+
+def test_tm_market_value_parses_units() -> None:
+    assert _tm_market_value("€1.30bn") == 1_300_000_000
+    assert _tm_market_value("€29.45m") == 29_450_000
+    assert _tm_market_value("€500k") == 500_000
+    assert _tm_market_value("€900Th.") == 900_000
+    assert _tm_market_value("-") is None
+    assert _tm_market_value("") is None
+
+
+def test_parse_competition_clubs_extracts_squad_value() -> None:
+    clubs = parse_competition_clubs(fixture("competition-clubs-ES1.html"))
+    assert len(clubs) == 20
+    # El primero de la fixture es el Real Madrid, con €1.30bn de valor de plantilla.
+    madrid = clubs[0]
+    assert madrid.name == "Real Madrid"
+    assert madrid.squad_value == 1_300_000_000
+    assert all(club.squad_value and club.squad_value > 0 for club in clubs)
+
+
+def _seed_team_mapping(mappings: Path, tm_club_id: int, canonical_id: str) -> None:
+    mappings.mkdir(exist_ok=True)
+    pd.DataFrame(
+        [
+            {
+                "canonical_id": canonical_id,
+                "fuente": "transfermarkt",
+                "id_en_fuente": str(tm_club_id),
+                "metodo": "manual",
+                "fecha": "2026-07-17",
+            }
+        ]
+    ).to_csv(mappings / "teams.csv", index=False)
+
+
+def test_ingest_squad_values_writes_table_with_league_average(
+    storage: Storage, tmp_path: Path
+) -> None:
+    clubs = parse_competition_clubs(fixture("competition-clubs-ES1.html"))
+    madrid_id = clubs[0].id
+    mappings = tmp_path / "mappings"
+    _seed_team_mapping(mappings, madrid_id, "t001")
+
+    result = ingest_squad_values(
+        storage,
+        season=2025,
+        leagues=["la-liga"],
+        mappings_dir=str(mappings),
+        transport=RoutingTransport(default_routes()),
+    )
+    assert result.rows["squad_values"] == 20
+    assert result.stats["ligas"] == 1
+
+    values = storage.curated.read_table("squad_values")
+    assert len(values) == 20
+    assert set(values["competition"].unique()) == {"la-liga"}
+    madrid = values[values["club_id"] == madrid_id].iloc[0]
+    assert madrid["squad_value"] == 1_300_000_000
+    # El club de La Liga con mapping queda resuelto a canónico; el resto, vacío.
+    assert madrid["canonical_team_id"] == "t001"
+    assert (values.loc[values["club_id"] != madrid_id, "canonical_team_id"] == "").all()
+
+    # El nivel de liga sale de un promedio simple (acceptance criterion).
+    league_level = values["squad_value"].mean()
+    assert league_level > 0
+
+
+def test_ingest_squad_values_partitions_by_competition_and_season(
+    storage: Storage, tmp_path: Path
+) -> None:
+    # Con la misma página-fixture para dos ligas, cada una es su propia partición.
+    ingest_squad_values(
+        storage,
+        season=2025,
+        leagues=["la-liga", "premier-league"],
+        mappings_dir=str(tmp_path / "mappings"),
+        transport=RoutingTransport(default_routes()),
+    )
+    values = storage.curated.read_table("squad_values")
+    assert set(values["competition"].unique()) == {"la-liga", "premier-league"}
+    assert set(values["season"].astype(str).unique()) == {"2025"}
+    # Los clubes extranjeros conservan su id de Transfermarkt, sin canónico.
+    premier = values[values["competition"] == "premier-league"]
+    assert (premier["canonical_team_id"] == "").all()
+
+
+def test_ingest_squad_values_cached_recures_without_refetching(
+    storage: Storage, tmp_path: Path
+) -> None:
+    ingest_squad_values(
+        storage,
+        season=2025,
+        leagues=["la-liga"],
+        mappings_dir=str(tmp_path / "mappings"),
+        transport=RoutingTransport(default_routes()),
+    )
+    transport = RoutingTransport(default_routes())
+    result = ingest_squad_values(
+        storage,
+        season=2025,
+        leagues=["la-liga"],
+        mappings_dir=str(tmp_path / "mappings"),
+        transport=transport,
+        cached=True,
+    )
+    assert result.rows["squad_values"] == 20
+    assert transport.urls == []  # se re-curó desde raw/, sin pedir nada
 
 
 def test_fetch_squad(storage: Storage) -> None:

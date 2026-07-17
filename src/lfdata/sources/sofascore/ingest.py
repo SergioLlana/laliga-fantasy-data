@@ -414,13 +414,22 @@ def resolve_season_id(client: SofaScoreClient, tournament_id: int, year: int) ->
 
 
 def _finished_events(
-    client: SofaScoreClient, tournament_id: int, season_id: int, max_pages: int | None
+    client: SofaScoreClient,
+    tournament_id: int,
+    season_id: int,
+    max_pages: int | None,
+    *,
+    dataset: str = "tournament-events",
 ) -> list[CalendarEvent]:
-    """Todos los partidos terminados de la liga-temporada, paginando el calendario."""
+    """Todos los partidos terminados de la liga-temporada, paginando el calendario.
+
+    ``dataset`` elige el prefijo raw del calendario (por defecto ``tournament-events``;
+    el backfill de copas pasa ``cup-events``).
+    """
     events: list[CalendarEvent] = []
     page = 0
     while True:
-        response = client.fetch_events(tournament_id, season_id, page)
+        response = client.fetch_events(tournament_id, season_id, page, dataset=dataset)
         events.extend(e for e in response.events if e.finished)
         page += 1
         if not response.has_next_page or (max_pages is not None and page >= max_pages):

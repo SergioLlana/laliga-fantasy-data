@@ -9,8 +9,10 @@ import os
 
 from lfdata import __version__
 from lfdata.newcomers import SINCE_DAYS as NEWCOMER_SINCE_DAYS
+from lfdata.sources.sofascore import CALENDAR_TOURNAMENTS as SOFASCORE_CALENDAR_TOURNAMENTS
 from lfdata.sources.sofascore import TOURNAMENTS as SOFASCORE_TOURNAMENTS
 from lfdata.sources.transfermarkt import DEFAULT_SEASON
+from lfdata.sources.transfermarkt import SQUAD_VALUE_LEAGUES as TM_SQUAD_VALUE_LEAGUES
 
 DEFAULT_DATA_URI = "file://./data"
 DEFAULT_MAPPINGS_DIR = "mappings"
@@ -134,6 +136,40 @@ def build_parser() -> argparse.ArgumentParser:
     )
     transfermarkt.set_defaults(func=_cmd_ingest_transfermarkt)
 
+    tm_values = ingest_sources.add_parser(
+        "transfermarkt-values",
+        help="Valor total de plantilla por club de las 7 ligas (una petición por liga-temporada)",
+    )
+    tm_values.add_argument(
+        "--league",
+        action="append",
+        dest="leagues",
+        choices=tuple(TM_SQUAD_VALUE_LEAGUES),
+        help="Liga a ingerir (repetible); por defecto las 7",
+    )
+    tm_values.add_argument(
+        "--season",
+        type=int,
+        default=DEFAULT_SEASON,
+        help=f"saison_id de Transfermarkt (año de inicio; por defecto {DEFAULT_SEASON})",
+    )
+    tm_values.add_argument(
+        "--cached",
+        action="store_true",
+        help="Re-cura desde raw/ sin volver a pedir la página de competición (ADR 0003)",
+    )
+    tm_values.add_argument(
+        "--data",
+        default=os.environ.get("LFDATA_DATA", DEFAULT_DATA_URI),
+        help=f"URI base del almacenamiento (por defecto {DEFAULT_DATA_URI} o $LFDATA_DATA)",
+    )
+    tm_values.add_argument(
+        "--mappings",
+        default=DEFAULT_MAPPINGS_DIR,
+        help=f"Directorio de los ficheros de mappings (por defecto {DEFAULT_MAPPINGS_DIR}/)",
+    )
+    tm_values.set_defaults(func=_cmd_ingest_transfermarkt_values)
+
     sofascore = ingest_sources.add_parser(
         "sofascore",
         help="Historial completo de un jugador (bajo demanda, cualquier liga)",
@@ -200,6 +236,49 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bf_sofascore.set_defaults(func=_cmd_backfill_sofascore)
 
+    bf_cups = backfill_sources.add_parser(
+        "sofascore-cups",
+        help=(
+            "Copa del Rey y competiciones UEFA: baja los partidos de equipos de La Liga "
+            "y cura fixtures + cup_minutes (densidad de calendario, issue #68)"
+        ),
+    )
+    bf_cups.add_argument(
+        "--competition",
+        required=True,
+        choices=tuple(SOFASCORE_CALENDAR_TOURNAMENTS),
+        help="Competición de copa/UEFA a backfillear",
+    )
+    bf_cups.add_argument(
+        "--season",
+        type=int,
+        required=True,
+        help="Año de inicio de la temporada (2025 = 2025/26), como en las demás fuentes",
+    )
+    bf_cups.add_argument(
+        "--max-matches",
+        type=int,
+        default=None,
+        help="Limita el número de partidos nuevos descargados (prueba parcial)",
+    )
+    bf_cups.add_argument(
+        "--max-pages",
+        type=int,
+        default=None,
+        help="Limita las páginas del calendario recorridas (prueba parcial)",
+    )
+    bf_cups.add_argument(
+        "--data",
+        default=os.environ.get("LFDATA_DATA", DEFAULT_DATA_URI),
+        help=f"URI base del almacenamiento (por defecto {DEFAULT_DATA_URI} o $LFDATA_DATA)",
+    )
+    bf_cups.add_argument(
+        "--mappings",
+        default=DEFAULT_MAPPINGS_DIR,
+        help=f"Directorio de los ficheros de mappings (por defecto {DEFAULT_MAPPINGS_DIR}/)",
+    )
+    bf_cups.set_defaults(func=_cmd_backfill_sofascore_cups)
+
     curate = subparsers.add_parser(
         "curate",
         help="Reconstruye tablas curadas desde raw/ o desde otras curadas (sin peticiones)",
@@ -257,6 +336,25 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Directorio de los ficheros de mappings (por defecto {DEFAULT_MAPPINGS_DIR}/)",
     )
     so_matches.set_defaults(func=_cmd_curate_sofascore_matches)
+
+    so_cups = curate_targets.add_parser(
+        "sofascore-cups",
+        help=(
+            "Re-cura fixtures y cup_minutes desde raw/ (tournament-events + cup-events + "
+            "cup-lineups): el calendario y los minutos entre semana de La Liga, sin peticiones"
+        ),
+    )
+    so_cups.add_argument(
+        "--data",
+        default=os.environ.get("LFDATA_DATA", DEFAULT_DATA_URI),
+        help=f"URI base del almacenamiento (por defecto {DEFAULT_DATA_URI} o $LFDATA_DATA)",
+    )
+    so_cups.add_argument(
+        "--mappings",
+        default=DEFAULT_MAPPINGS_DIR,
+        help=f"Directorio de los ficheros de mappings (por defecto {DEFAULT_MAPPINGS_DIR}/)",
+    )
+    so_cups.set_defaults(func=_cmd_curate_sofascore_cups)
 
     crosscheck = subparsers.add_parser(
         "crosscheck",
@@ -542,6 +640,21 @@ def _cmd_ingest_transfermarkt(args: argparse.Namespace) -> int:
     return _report_ingest(result, args.competition, args.data)
 
 
+def _cmd_ingest_transfermarkt_values(args: argparse.Namespace) -> int:
+    from lfdata.sources.transfermarkt import ingest_squad_values
+    from lfdata.storage import Storage
+
+    storage = Storage(args.data)
+    result = ingest_squad_values(
+        storage,
+        season=args.season,
+        leagues=args.leagues,
+        mappings_dir=args.mappings,
+        cached=args.cached,
+    )
+    return _report_ingest(result, f"squad_values {args.season}", args.data)
+
+
 def _cmd_ingest_sofascore(args: argparse.Namespace) -> int:
     from lfdata.sources.sofascore import ingest_player
     from lfdata.storage import Storage
@@ -565,6 +678,33 @@ def _cmd_backfill_sofascore(args: argparse.Namespace) -> int:
         mappings_dir=args.mappings,
     )
     return _report_ingest(result, f"{args.competition} {args.season}", args.data)
+
+
+def _cmd_backfill_sofascore_cups(args: argparse.Namespace) -> int:
+    from lfdata.sources.sofascore import backfill_cups_for_year, rebuild_cups
+    from lfdata.storage import Storage
+
+    storage = Storage(args.data)
+    # Baja el raw de las copas y, a continuación, re-cura fixtures + cup_minutes desde
+    # raw/ (incluye el calendario de liga ya bajado): un comando deja la tabla lista.
+    result = backfill_cups_for_year(
+        storage,
+        args.competition,
+        args.season,
+        max_matches=args.max_matches,
+        max_pages=args.max_pages,
+    )
+    result |= rebuild_cups(storage, mappings_dir=args.mappings)
+    return _report_ingest(result, f"{args.competition} {args.season}", args.data)
+
+
+def _cmd_curate_sofascore_cups(args: argparse.Namespace) -> int:
+    from lfdata.sources.sofascore import rebuild_cups
+    from lfdata.storage import Storage
+
+    storage = Storage(args.data)
+    result = rebuild_cups(storage, mappings_dir=args.mappings)
+    return _report_ingest(result, "sofascore-cups", args.data)
 
 
 def _cmd_curate_sofascore_catalog(args: argparse.Namespace) -> int:

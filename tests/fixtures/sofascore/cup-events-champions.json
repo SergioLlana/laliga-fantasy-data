@@ -1,0 +1,33 @@
+{
+  "events": [
+    {
+      "tournament": {
+        "name": "Champions League",
+        "slug": "champions-league",
+        "uniqueTournament": {"id": 7, "name": "Champions League", "slug": "champions-league"}
+      },
+      "season": {"name": "Champions League 25/26", "year": "25/26", "id": 77000},
+      "status": {"code": 100, "description": "Ended", "type": "finished"},
+      "homeTeam": {"id": 2821, "name": "Celta Vigo", "slug": "celta-vigo"},
+      "awayTeam": {"id": 3000001, "name": "Bayern Munich", "slug": "bayern-munich"},
+      "id": 14090001,
+      "startTimestamp": 1778000000,
+      "hasEventPlayerStatistics": true
+    },
+    {
+      "tournament": {
+        "name": "Champions League",
+        "slug": "champions-league",
+        "uniqueTournament": {"id": 7, "name": "Champions League", "slug": "champions-league"}
+      },
+      "season": {"name": "Champions League 25/26", "year": "25/26", "id": 77000},
+      "status": {"code": 100, "description": "Ended", "type": "finished"},
+      "homeTeam": {"id": 3000001, "name": "Bayern Munich", "slug": "bayern-munich"},
+      "awayTeam": {"id": 3000002, "name": "Arsenal", "slug": "arsenal"},
+      "id": 14090002,
+      "startTimestamp": 1778000000,
+      "hasEventPlayerStatistics": true
+    }
+  ],
+  "hasNextPage": false
+}

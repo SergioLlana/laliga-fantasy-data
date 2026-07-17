@@ -160,4 +160,8 @@ def test_restamp_without_tables_is_noop(tmp_path):
     storage = storage_at(tmp_path)
     mappings = _seed_mapping(tmp_path)
     result = restamp_canonical(storage, mappings_dir=mappings)
-    assert result.rows == {"player_match_stats": 0, "player_season_stats": 0}
+    assert result.rows == {
+        "player_match_stats": 0,
+        "player_season_stats": 0,
+        "cup_minutes": 0,
+    }

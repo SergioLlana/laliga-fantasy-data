@@ -59,6 +59,19 @@ uv run lfdata map --season N
 # 8. Re-estampa el canonical_id en el eventing ya curado (cruce con los mappings,
 #    sin releer raw/), para que player_match_stats deje de estar huérfano
 uv run lfdata curate sofascore-canonical
+
+# 9. Copa del Rey y competiciones UEFA de esa temporada: densidad de calendario y
+#    minutos entre semana de los equipos de La Liga (baja + cura fixtures/cup_minutes).
+#    Va después del catálogo (paso 6): sabe quiénes son "los nuestros" por sofascore_teams
+uv run lfdata backfill sofascore-cups --competition copa-del-rey --season N
+uv run lfdata backfill sofascore-cups --competition champions-league --season N
+uv run lfdata backfill sofascore-cups --competition europa-league --season N
+uv run lfdata backfill sofascore-cups --competition conference-league --season N
+
+# 10. Valor de plantilla por club de las 7 ligas cubiertas (una petición por liga):
+#     nivel de equipo y de liga. Va tras el map (paso 7) para resolver el canónico de
+#     los clubes de La Liga/Segunda; los extranjeros conservan su id de Transfermarkt
+uv run lfdata ingest transfermarkt-values --season N
 ```
 
 Al terminar las cinco temporadas:
@@ -97,6 +110,11 @@ uv run lfdata ingest biwenger --competition la-liga --season 2026 --delta
 uv run lfdata ingest biwenger-rounds --competition la-liga --season 2026 --resume
 uv run lfdata backfill sofascore --competition la-liga --season 2026
 uv run lfdata curate sofascore-catalog   # refresca el catálogo con las alineaciones nuevas
+# Copa/UEFA de la jornada entre semana (fixtures + minutos de los equipos de La Liga)
+uv run lfdata backfill sofascore-cups --competition copa-del-rey --season 2026
+uv run lfdata backfill sofascore-cups --competition champions-league --season 2026
+uv run lfdata backfill sofascore-cups --competition europa-league --season 2026
+uv run lfdata backfill sofascore-cups --competition conference-league --season 2026
 ```
 
 ### Semanal
@@ -109,6 +127,7 @@ uv run lfdata ingest transfermarkt --competition la-liga --season 2026 --since-d
 uv run lfdata curate sofascore-catalog     # por si newcomers trajo alineaciones nuevas
 uv run lfdata map --season 2026            # + revisar mappings/*-review.csv (Transfermarkt y SofaScore)
 uv run lfdata curate sofascore-canonical   # re-estampa el eventing con los mappings nuevos
+uv run lfdata ingest transfermarkt-values --season 2026   # refresca el valor de plantilla (nivel de equipo/liga)
 uv run lfdata map --check
 ```
 
