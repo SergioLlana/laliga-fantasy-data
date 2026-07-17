@@ -29,7 +29,6 @@ aquí (lo cubre el camino bajo demanda, issue #81).
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -75,8 +74,8 @@ def build_catalog(storage: Storage) -> IngestResult:
         {"team_id": team_id, "team_name": name, "competition": comp, "season": season}
         for (comp, season, team_id), name in sorted(teams.items())
     ]
-    _write_partitioned(storage, "sofascore_teams", team_rows, TEAM_COLUMNS)
-    _write_partitioned(storage, "sofascore_players", list(players.values()), PLAYER_COLUMNS)
+    storage.curated.write_partitioned("sofascore_teams", team_rows, TEAM_COLUMNS)
+    storage.curated.write_partitioned("sofascore_players", list(players.values()), PLAYER_COLUMNS)
 
     return IngestResult(
         rows={"sofascore_players": len(players), "sofascore_teams": len(team_rows)},
@@ -166,23 +165,6 @@ def _read_lineups(storage: Storage, events: dict[int, dict]) -> tuple[dict[tuple
     return players, anomalies
 
 
-def _write_partitioned(storage: Storage, table: str, rows: list[dict], columns: list[str]) -> None:
-    """Reescribe cada partición ``(competición, temporada)`` desde cero.
-
-    El catálogo se reconstruye entero desde raw/, así que ``write_table`` (refresh
-    completo de la partición) es lo correcto: lo que ya no está en raw desaparece.
-    """
-    by_partition: dict[tuple[str, str], list[dict]] = defaultdict(list)
-    for row in rows:
-        by_partition[(row["competition"], row["season"])].append(row)
-    for (competition, season), part_rows in by_partition.items():
-        storage.curated.write_table(
-            table,
-            pd.DataFrame(part_rows, columns=columns),
-            partition={"competition": competition, "season": season},
-        )
-
-
 def _birth_date(timestamp: int | None) -> str:
     """Epoch UTC → fecha ISO ``YYYY-MM-DD``; vacío si no hay."""
     if timestamp is None:
@@ -192,7 +174,7 @@ def _birth_date(timestamp: int | None) -> str:
 
 # --- re-estampado del canonical_id en las tablas ya curadas ------------------
 
-_CANONICAL_TABLES = ("player_match_stats", "player_season_stats")
+_CANONICAL_TABLES = ("player_match_stats", "player_season_stats", "cup_minutes")
 
 
 def restamp_canonical(storage: Storage, mappings_dir: str = "mappings") -> IngestResult:

@@ -46,9 +46,25 @@ WAIT_SECONDS = 4.0
 PROXY_OVERFLOW = False
 
 # Competición de la plataforma -> (slug de URL, código de wettbewerb de Transfermarkt).
+# Las plenamente cubiertas: se ingieren sus plantillas (kader) y sus jugadores
+# entran en los mappings. De aquí salen las choices del CLI de ``ingest``.
 COMPETITIONS = {
     "la-liga": ("laliga", "ES1"),
     "segunda-division": ("laliga2", "ES2"),
+}
+
+# Ligas cuyo valor de plantilla por club se ingiere (issue #69). Superset de
+# COMPETITIONS con las 5 grandes europeas + la Primeira portuguesa (primer feeder
+# no-big-5 de La Liga). Solo se pide su **página de competición** —una petición por
+# liga-temporada—: nunca sus plantillas ni el mapping de sus jugadores extranjeros
+# (ADR 0008). El slug es cosmético (Transfermarkt resuelve por el código wettbewerb).
+SQUAD_VALUE_LEAGUES = {
+    **COMPETITIONS,
+    "premier-league": ("premier-league", "GB1"),
+    "serie-a": ("serie-a", "IT1"),
+    "bundesliga": ("bundesliga", "L1"),
+    "ligue-1": ("ligue-1", "FR1"),
+    "primeira-liga": ("liga-portugal", "PO1"),
 }
 
 
@@ -69,12 +85,12 @@ class TransfermarktClient:
     def fetch_competition_clubs(
         self, competition: str, *, season: int, cached: bool = False
     ) -> list[Club]:
-        """Clubes que participan en la competición esa temporada."""
-        if competition not in COMPETITIONS:
+        """Clubes que participan en la competición esa temporada, con su valor de plantilla."""
+        if competition not in SQUAD_VALUE_LEAGUES:
             raise ValueError(
-                f"Competición desconocida: {competition!r} (usa {tuple(COMPETITIONS)})"
+                f"Competición desconocida: {competition!r} (usa {tuple(SQUAD_VALUE_LEAGUES)})"
             )
-        slug, code = COMPETITIONS[competition]
+        slug, code = SQUAD_VALUE_LEAGUES[competition]
         url = f"{BASE}/{slug}/startseite/wettbewerb/{code}/saison_id/{season}"
         # La temporada va en el nombre (como en kader): dos temporadas ingeridas
         # el mismo día conviven en raw/ en vez de pisarse.

@@ -41,6 +41,9 @@ class SourceFormatError(Exception):
 class Club:
     id: int
     name: str
+    # Valor total de plantilla en euros (columna de la página de competición,
+    # issue #69). ``None`` si la fila no lo publica.
+    squad_value: int | None = None
 
 
 @dataclass(frozen=True)
@@ -106,11 +109,32 @@ def _club_id_from_href(href: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+# El valor de mercado de Transfermarkt.com viene como "€1.30bn" / "€29.45m" /
+# "€500k" / "€900Th." (punto decimal, coma de millar); un guion o vacío es sin dato.
+_TM_VALUE = re.compile(r"€\s*([\d.,]+)\s*(bn|m|k|th)?", re.IGNORECASE)
+_TM_VALUE_MULTIPLIER = {"bn": 1_000_000_000, "m": 1_000_000, "k": 1_000, "th": 1_000, "": 1}
+
+
+def _tm_market_value(text: str) -> int | None:
+    """Importe en euros de un valor de mercado de Transfermarkt; None si no hay."""
+    match = _TM_VALUE.search(text or "")
+    if match is None:
+        return None
+    number = float(match.group(1).replace(",", ""))
+    multiplier = _TM_VALUE_MULTIPLIER[(match.group(2) or "").lower()]
+    return round(number * multiplier)
+
+
 # --- competición → clubes ----------------------------------------------------
 
 
 def parse_competition_clubs(payload: bytes | str) -> list[Club]:
-    """Clubes de la tabla de clasificación/participantes de la competición."""
+    """Clubes de la tabla de participantes, con su valor total de plantilla.
+
+    El valor total es la última columna monetaria de la fila (la media de valor
+    también lo es, pero el total va a la derecha): tomamos el último importe
+    reconocible, robusto a que se desplacen las columnas intermedias.
+    """
     tbody = _items_tbody(_soup(payload), what="clubes de la competición")
     clubs: dict[int, Club] = {}
     for row in tbody.find_all("tr", recursive=False):
@@ -121,10 +145,20 @@ def parse_competition_clubs(payload: bytes | str) -> list[Club]:
         club_id = _club_id_from_href(link["href"])
         name = link.get_text(strip=True) or (link.get("title") or "")
         if club_id is not None and club_id not in clubs:
-            clubs[club_id] = Club(id=club_id, name=name)
+            clubs[club_id] = Club(id=club_id, name=name, squad_value=_row_squad_value(row))
     if not clubs:
         raise SourceFormatError("La página de competición no listó ningún club")
     return list(clubs.values())
+
+
+def _row_squad_value(row) -> int | None:
+    """Valor total de plantilla de una fila de club: el último importe de la fila."""
+    values = [
+        value
+        for cell in row.find_all("td")
+        if (value := _tm_market_value(cell.get_text(strip=True)))
+    ]
+    return values[-1] if values else None
 
 
 # --- plantilla (kader) -------------------------------------------------------

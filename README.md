@@ -31,6 +31,14 @@ uv run lfdata ingest transfermarkt --competition segunda-division --max-clubs 2
 # pero lo cura igual desde raw/: reconstruye la tabla sin re-scrapear
 uv run lfdata ingest transfermarkt --competition la-liga --season 2026 --since-days 30
 
+# Valor total de plantilla por club (una petición por liga-temporada) de las 7 ligas
+# (La Liga, Segunda, Premier, Serie A, Bundesliga, Ligue 1 y Primeira): el nivel de
+# equipo del modelo y, promediando por liga, el nivel de liga del baseline de fichajes.
+# Los clubes de La Liga/Segunda se resuelven a canónico; los extranjeros conservan su id
+uv run lfdata ingest transfermarkt-values --season 2025
+uv run lfdata ingest transfermarkt-values --season 2025 --league premier-league
+uv run lfdata ingest transfermarkt-values --season 2025 --cached   # re-cura desde raw/
+
 # Mappings a IDs canónicos (Biwenger↔Transfermarkt↔SofaScore): aprueba los seguros
 # y deja los dudosos en mappings/*-review.csv para decidirlos a mano (ver
 # mappings/README.md). --season es la temporada de cuyas plantillas salen los
@@ -49,6 +57,13 @@ uv run lfdata ingest sofascore --player 1086128
 # --max-matches acota una prueba (--season es el año de inicio: 2025 = 2025/26)
 uv run lfdata backfill sofascore --competition la-liga --season 2025 --max-matches 5
 
+# Copa del Rey y competiciones UEFA (Champions, Europa League, Conference): baja solo
+# los partidos con equipos de La Liga y cura fixtures (calendario) + cup_minutes (minutos
+# entre semana), la densidad de calendario del modelo de minutos. Requiere el catálogo de
+# La Liga ya construido (sabe quiénes son "los nuestros" por sofascore_teams)
+uv run lfdata backfill sofascore-cups --competition champions-league --season 2025
+uv run lfdata backfill sofascore-cups --competition copa-del-rey --season 2025 --max-matches 5
+
 # Catálogo de identidad de SofaScore desde raw/ (alineaciones + calendario), sin
 # peticiones: publica sofascore_players y sofascore_teams, la evidencia que lee
 # `lfdata map`. Se corre tras el backfill y antes del map
@@ -57,6 +72,9 @@ uv run lfdata curate sofascore-catalog
 # Tras aprobar mappings nuevos, re-estampa el canonical_id en el eventing ya
 # curado cruzándolo con los mappings (sin releer raw/)
 uv run lfdata curate sofascore-canonical
+
+# Re-cura fixtures y cup_minutes desde raw/ (calendario de liga + copas), sin peticiones
+uv run lfdata curate sofascore-cups
 
 # Detector de fichajes: quien está en la plantilla sin puntos en temporadas
 # anteriores de esa competición (el ascendido de Segunda incluido: es una liga de
@@ -70,7 +88,7 @@ uv run lfdata newcomers --season 2026 --max-newcomers 5  # tope de fichajes por 
 uv run lfdata crosscheck sofascore-biwenger-minutes --out crosscheck.json
 ```
 
-Los datos se escriben en dos capas bajo la URI de `--data` (por defecto `file://./data`, configurable con `$LFDATA_DATA`): la respuesta cruda tal cual en `raw/` y tablas Parquet en `curated/`, legibles con pandas o DuckDB. Biwenger produce `biwenger_players` (solo jugadores: los entrenadores, que Biwenger publica en la misma lista con ficha y precio, quedan fuera) y `biwenger_teams`; Transfermarkt produce `transfermarkt_players` (particionada por competición **y temporada**: la pertenencia a una plantilla es de una temporada concreta, así que ingerir 2023 no toca a los jugadores de 2026), `market_values_tm`, `transfers`, `availability_tm` (disponibilidad por partido) e `injuries_tm` (historial de lesiones) —estas cuatro son el histórico del jugador, el mismo desde cualquier temporada, y van solo por competición—, aún con IDs de Transfermarkt, a la espera del paso de mapping a IDs canónicos. SofaScore produce `player_season_stats` (agregado de 115 campos por jugador-temporada) y `player_match_stats` (nota y métricas de evento por jugador-partido: minutos, pases, remates, goles, asistencias, xG…); cada fila lleva su `canonical_id` si el id de SofaScore ya está mapeado y, si no, vacío hasta que `lfdata map` (sobre el catálogo `sofascore_players`) proponga el canónico y `lfdata curate sofascore-canonical` lo re-estampe. El catálogo de identidad de SofaScore (`sofascore_players`, `sofascore_teams`) se reconstruye desde `raw/` sin peticiones con `lfdata curate sofascore-catalog`. El detector de fichajes produce `newcomers` (grano jugador-temporada de debut: quién llegó, a qué equipo y si su historial está descargado), que es además su marca de idempotencia: un fichaje ya resuelto no vuelve a generar peticiones.
+Los datos se escriben en dos capas bajo la URI de `--data` (por defecto `file://./data`, configurable con `$LFDATA_DATA`): la respuesta cruda tal cual en `raw/` y tablas Parquet en `curated/`, legibles con pandas o DuckDB. Biwenger produce `biwenger_players` (solo jugadores: los entrenadores, que Biwenger publica en la misma lista con ficha y precio, quedan fuera) y `biwenger_teams`; Transfermarkt produce `transfermarkt_players` (particionada por competición **y temporada**: la pertenencia a una plantilla es de una temporada concreta, así que ingerir 2023 no toca a los jugadores de 2026), `market_values_tm`, `transfers`, `availability_tm` (disponibilidad por partido) e `injuries_tm` (historial de lesiones) —estas cuatro son el histórico del jugador, el mismo desde cualquier temporada, y van solo por competición—, aún con IDs de Transfermarkt, a la espera del paso de mapping a IDs canónicos. SofaScore produce `player_season_stats` (agregado de 115 campos por jugador-temporada) y `player_match_stats` (nota y métricas de evento por jugador-partido: minutos, pases, remates, goles, asistencias, xG…); cada fila lleva su `canonical_id` si el id de SofaScore ya está mapeado y, si no, vacío hasta que `lfdata map` (sobre el catálogo `sofascore_players`) proponga el canónico y `lfdata curate sofascore-canonical` lo re-estampe. El catálogo de identidad de SofaScore (`sofascore_players`, `sofascore_teams`) se reconstruye desde `raw/` sin peticiones con `lfdata curate sofascore-catalog`. De la Copa del Rey y las competiciones UEFA (Champions, Europa League, Conference) SofaScore produce, solo para los equipos de La Liga, `fixtures` (un partido por fila con fecha y ambos equipos, incluida la liga: la densidad de calendario en una sola tabla) y `cup_minutes` (minutos por jugador-partido entre semana, con `canonical_id`); su `raw/` vive en datasets propios (`cup-events`, `cup-lineups`) para no mezclarse con el eventing ni con el catálogo de identidad. Transfermarkt produce además `squad_values` (valor total de plantilla por club-temporada de las 7 ligas cubiertas, con `canonical_team_id` para los clubes de La Liga/Segunda): el nivel de equipo del modelo de rendimiento y, promediado por liga, el nivel de liga del baseline de fichajes. El detector de fichajes produce `newcomers` (grano jugador-temporada de debut: quién llegó, a qué equipo y si su historial está descargado), que es además su marca de idempotencia: un fichaje ya resuelto no vuelve a generar peticiones.
 
 ## Desarrollo
 

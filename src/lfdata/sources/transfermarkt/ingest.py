@@ -17,12 +17,18 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 
 from lfdata.sources.http import HttpTransport, SourceHTTPError, scrapeops_proxy_from_env
 from lfdata.sources.ingestion import IngestResult, PlayerFailure
-from lfdata.sources.transfermarkt.client import PROXY_OVERFLOW, WAIT_SECONDS, TransfermarktClient
+from lfdata.sources.transfermarkt.client import (
+    PROXY_OVERFLOW,
+    SQUAD_VALUE_LEAGUES,
+    WAIT_SECONDS,
+    TransfermarktClient,
+)
 from lfdata.sources.transfermarkt.parse import (
     Club,
     availability_rows,
@@ -36,6 +42,9 @@ logger = logging.getLogger(__name__)
 # Temporada por defecto: saison_id de Transfermarkt es el año de inicio
 # (2026 = temporada 2026-27), la que está en curso.
 DEFAULT_SEASON = 2026
+
+SQUAD_VALUES_TABLE = "squad_values"
+TRANSFERMARKT = "transfermarkt"
 
 # Cada tabla es un snapshot de historia completa por jugador; el upsert por club
 # la actualiza clave a clave. ``transfermarkt_players`` se indexa por ``id``.
@@ -186,6 +195,92 @@ def ingest_clubs(
         len(result.failures),
     )
     return result
+
+
+def ingest_squad_values(
+    storage: Storage,
+    *,
+    season: int = DEFAULT_SEASON,
+    leagues: Iterable[str] | None = None,
+    mappings_dir: str = "mappings",
+    transport: HttpTransport | None = None,
+    cached: bool = False,
+) -> IngestResult:
+    """Publica ``squad_values``: valor total de plantilla por club-temporada (issue #69).
+
+    Una petición por liga-temporada (la página de competición), para las 7 ligas de
+    :data:`SQUAD_VALUE_LEAGUES` o el subconjunto ``leagues``. Es el nivel de equipo
+    (propio/rival) del modelo de rendimiento y, promediando por liga, el nivel de liga
+    del baseline de fichajes (docs/implementation/04 y 05).
+
+    Los clubes de La Liga/Segunda se resuelven a ``canonical_team_id`` con los mappings
+    de equipo ya aprobados; los extranjeros conservan solo su id de Transfermarkt (no se
+    inventan canónicos sin revisión, ADR 0001; no se mapean sus jugadores, ADR 0008).
+
+    Cada liga-temporada es una partición que se reescribe entera (la página trae la
+    competición completa de una vez). ``cached`` re-cura desde ``raw/`` sin volver a
+    pedir (ADR 0003). ``capture_date`` es la fecha real de descarga del raw, para datar
+    la foto del valor al cierre de cada ventana de mercado.
+    """
+    # Import perezoso: ``lfdata.mappings.run`` importa este módulo, así que traer
+    # MappingStore a nivel de módulo cerraría un ciclo de importación.
+    from lfdata.mappings import MappingStore
+
+    transport = transport or HttpTransport(
+        wait_seconds=WAIT_SECONDS,
+        overflow_proxy=scrapeops_proxy_from_env(enabled=PROXY_OVERFLOW),
+    )
+    client = TransfermarktClient(transport, storage.raw)
+    store = MappingStore(Path(mappings_dir))
+    store.load()
+    canonical_by_tm_team = MappingStore.canonical_by_source(store.teams, TRANSFERMARKT)
+
+    leagues = list(leagues) if leagues is not None else list(SQUAD_VALUE_LEAGUES)
+    result = IngestResult(rows={SQUAD_VALUES_TABLE: 0}, stats={"ligas": 0})
+    for league in leagues:
+        clubs = client.fetch_competition_clubs(league, season=season, cached=cached)
+        # Sin ``cached`` acabamos de descargar hoy: la fecha de captura es hoy, sin
+        # reconsultar el store. Solo re-curando (``cached``) hay que averiguar cuándo
+        # se bajó lo que ya está en raw/.
+        if cached:
+            code = SQUAD_VALUE_LEAGUES[league][1]
+            capture_date = storage.raw.last_download_date(
+                TRANSFERMARKT, "competition-clubs", f"{code}-saison-{season}", extension="html"
+            )
+        else:
+            capture_date = datetime.now(tz=UTC).date()
+        records = [
+            {
+                "club_id": club.id,
+                "club_name": club.name,
+                "squad_value": club.squad_value,
+                "canonical_team_id": canonical_by_tm_team.get(str(club.id), ""),
+                "capture_date": capture_date,
+            }
+            for club in clubs
+        ]
+        frame = _squad_values_frame(records)
+        storage.curated.write_table(
+            SQUAD_VALUES_TABLE,
+            frame,
+            partition={"competition": league, "season": str(season)},
+        )
+        result.rows[SQUAD_VALUES_TABLE] += len(frame)
+        result.stats["ligas"] += 1
+        logger.info(
+            "transfermarkt squad_values %s %d: %d clubes (valor plantilla)",
+            league,
+            season,
+            len(frame),
+        )
+    return result
+
+
+def _squad_values_frame(records: list[dict]) -> pd.DataFrame:
+    columns = ["club_id", "club_name", "squad_value", "canonical_team_id", "capture_date"]
+    df = pd.DataFrame(records, columns=columns)
+    df["capture_date"] = pd.to_datetime(df["capture_date"], errors="coerce")
+    return df.astype({"club_id": "Int64", "squad_value": "Int64"})
 
 
 def _ingest_clubs(

@@ -16,7 +16,8 @@ from __future__ import annotations
 import io
 import os
 import tempfile
-from collections.abc import Mapping
+from collections import defaultdict
+from collections.abc import Iterable, Mapping
 from contextlib import suppress
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -299,6 +300,31 @@ class CuratedStore:
         df.to_parquet(buffer, index=False)
         self._backend.write_bytes(key, buffer.getvalue())
         return key
+
+    def write_partitioned(
+        self,
+        table: str,
+        rows: Iterable[Mapping],
+        columns: list[str],
+        *,
+        partition_keys: tuple[str, ...] = ("competition", "season"),
+    ) -> None:
+        """Reescribe cada partición desde cero, agrupando ``rows`` por ``partition_keys``.
+
+        Refresh total por partición para una tabla que se reconstruye entera desde raw/
+        (ADR 0003): agrupa las filas por los valores de ``partition_keys`` —que deben venir
+        como columnas en cada fila— y reescribe cada partición con :meth:`write_table`, de
+        modo que lo que ya no está en ``rows`` desaparece de su partición.
+        """
+        by_partition: dict[tuple, list[Mapping]] = defaultdict(list)
+        for row in rows:
+            by_partition[tuple(row[key] for key in partition_keys)].append(row)
+        for values, part_rows in by_partition.items():
+            self.write_table(
+                table,
+                pd.DataFrame(part_rows, columns=columns),
+                partition=dict(zip(partition_keys, values, strict=True)),
+            )
 
     def upsert_table(
         self,
