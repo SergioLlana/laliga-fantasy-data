@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
+from pydantic import ValidationError
 
 from lfdata.mappings import MappingStore
 from lfdata.mappings.matcher import birthdate_matches
@@ -34,7 +36,12 @@ from lfdata.mappings.normalize import name_compatible
 from lfdata.sources.http import HttpTransport, SourceHTTPError, scrapeops_proxy_from_env
 from lfdata.sources.ingestion import IngestResult, PlayerFailure
 from lfdata.sources.sofascore.client import PROXY_OVERFLOW, WAIT_SECONDS, SofaScoreClient
-from lfdata.sources.sofascore.models import CalendarEvent, LineupsResponse, SeasonRating
+from lfdata.sources.sofascore.models import (
+    CalendarEvent,
+    EventsResponse,
+    LineupsResponse,
+    SeasonRating,
+)
 from lfdata.storage import Storage
 
 logger = logging.getLogger(__name__)
@@ -229,6 +236,109 @@ def backfill_league_season(
 
     result.stats["jugadores_sin_mapping"] = len(unmapped)
     return result
+
+
+def rebuild_matches(storage: Storage, mappings_dir: str = "mappings") -> IngestResult:
+    """Re-cura ``player_match_stats`` desde ``raw/`` sin ninguna petición (ADR 0003, #80).
+
+    El backfill (:func:`backfill_league_season`) salta el partido cuyo lineup ya
+    está en ``raw/``: evita la descarga, pero **también** el curado. Esto reconstruye
+    la tabla releyendo ``event-lineups`` (las alineaciones que el backfill ya bajó) y
+    ``tournament-events`` (de donde salen competición, temporada y rival de cada
+    partido), aplicando la lógica y los mappings vigentes.
+
+    A diferencia de :func:`restamp_canonical` —que solo rellena el ``canonical_id``
+    cruzando la tabla ya curada con los mappings— aquí se rehace la fila entera, así
+    que recoge cualquier cambio en la lógica de curado, no solo la columna de join.
+
+    Reescribe cada partición ``(competición, temporada)`` completa desde raw/ (refresh
+    total, como :func:`build_catalog`): un partido cuyo lineup ya no esté en raw/
+    desaparece de la tabla. No pide nada a la fuente, así que la cuota y ScrapeOps no
+    se tocan.
+    """
+    store = MappingStore(Path(mappings_dir))
+    store.load()
+    canonical_by_sofascore = MappingStore.canonical_by_source(store.players, SOURCE)
+
+    events, event_anomalies = _finished_events_from_raw(storage)
+    rows_by_partition: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    unmapped: set[int] = set()
+    lineup_anomalies = 0
+    recured = 0
+    for name, payload in storage.raw.iter_latest(SOURCE, "event-lineups"):
+        try:
+            event_id = int(name)
+        except ValueError:
+            continue
+        meta = events.get(event_id)
+        if meta is None:
+            continue
+        event, competition, season, season_year = meta
+        try:
+            lineups = LineupsResponse.model_validate_json(payload)
+        except ValidationError:
+            logger.warning("sofascore lineups ilegible: %s, se salta la re-cura", name)
+            lineup_anomalies += 1
+            continue
+        rows = _lineup_rows(event, lineups, canonical_by_sofascore, season_year, unmapped)
+        rows_by_partition[(competition, season)].extend(rows)
+        recured += 1
+
+    total = 0
+    for (competition, season), rows in rows_by_partition.items():
+        storage.curated.write_table(
+            "player_match_stats",
+            pd.DataFrame(rows),
+            partition={"competition": competition, "season": season},
+        )
+        total += len(rows)
+
+    anomalies: dict[str, int] = {}
+    if event_anomalies:
+        anomalies["tournament-events ilegible"] = event_anomalies
+    if lineup_anomalies:
+        anomalies["lineups ilegible"] = lineup_anomalies
+    result = IngestResult(
+        rows={"player_match_stats": total},
+        stats={"partidos_recurados": recured, "jugadores_sin_mapping": len(unmapped)},
+        anomalies=anomalies,
+    )
+    logger.info(
+        "sofascore re-cura desde raw: %d partidos, %d filas, %d jugadores sin mapping",
+        recured,
+        total,
+        len(unmapped),
+    )
+    return result
+
+
+def _finished_events_from_raw(
+    storage: Storage,
+) -> tuple[dict[int, tuple[CalendarEvent, str, str, str | None]], int]:
+    """De ``tournament-events`` en raw/: metadatos de cada partido terminado.
+
+    Devuelve ``event_id -> (evento, competición, temporada, season_year)`` y el
+    número de ficheros ilegibles. ``competición`` y ``temporada`` son las **mismas
+    claves de partición** que escribió el backfill (id numérico del torneo e id
+    opaco de temporada de SofaScore), leídas del propio evento; ``season_year`` es
+    la etiqueta ``25/26`` que va como columna en la fila. Un evento sin torneo o sin
+    temporada no se puede particionar y se salta.
+    """
+    events: dict[int, tuple[CalendarEvent, str, str, str | None]] = {}
+    anomalies = 0
+    for name, payload in storage.raw.iter_latest(SOURCE, "tournament-events"):
+        try:
+            response = EventsResponse.model_validate_json(payload)
+        except ValidationError:
+            logger.warning("sofascore tournament-events ilegible: %s, se salta", name)
+            anomalies += 1
+            continue
+        for event in response.events:
+            ut_id = event.unique_tournament_id
+            if not event.finished or ut_id is None or event.season is None:
+                continue
+            events[event.id] = (event, str(ut_id), str(event.season.id), event.season.year)
+    return events, anomalies
 
 
 def backfill_league_season_for_year(
