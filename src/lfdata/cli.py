@@ -239,6 +239,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     so_canonical.set_defaults(func=_cmd_curate_sofascore_canonical)
 
+    so_matches = curate_targets.add_parser(
+        "sofascore-matches",
+        help=(
+            "Re-cura player_match_stats desde raw/ (event-lineups + tournament-events): "
+            "rehace la fila entera con la lógica y los mappings vigentes, sin peticiones"
+        ),
+    )
+    so_matches.add_argument(
+        "--data",
+        default=os.environ.get("LFDATA_DATA", DEFAULT_DATA_URI),
+        help=f"URI base del almacenamiento (por defecto {DEFAULT_DATA_URI} o $LFDATA_DATA)",
+    )
+    so_matches.add_argument(
+        "--mappings",
+        default=DEFAULT_MAPPINGS_DIR,
+        help=f"Directorio de los ficheros de mappings (por defecto {DEFAULT_MAPPINGS_DIR}/)",
+    )
+    so_matches.set_defaults(func=_cmd_curate_sofascore_matches)
+
     crosscheck = subparsers.add_parser(
         "crosscheck",
         help="Informes de validación cruzada entre fuentes (no escriben datos curados)",
@@ -564,6 +583,15 @@ def _cmd_curate_sofascore_canonical(args: argparse.Namespace) -> int:
     storage = Storage(args.data)
     result = restamp_canonical(storage, mappings_dir=args.mappings)
     return _report_ingest(result, "sofascore-canonical", args.data)
+
+
+def _cmd_curate_sofascore_matches(args: argparse.Namespace) -> int:
+    from lfdata.sources.sofascore import rebuild_matches
+    from lfdata.storage import Storage
+
+    storage = Storage(args.data)
+    result = rebuild_matches(storage, mappings_dir=args.mappings)
+    return _report_ingest(result, "sofascore-matches", args.data)
 
 
 def _cmd_crosscheck_minutes(args: argparse.Namespace) -> int:

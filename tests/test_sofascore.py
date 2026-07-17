@@ -18,6 +18,7 @@ from lfdata.sources.sofascore import (
     backfill_league_season,
     crossvalidate_minutes,
     ingest_player,
+    rebuild_matches,
     resolve_season_id,
     season_year_label,
 )
@@ -285,6 +286,85 @@ def test_backfill_respects_max_matches(tmp_path):
     )
     assert result.stats["partidos"] == 1
     assert result.rows["player_match_stats"] == 46
+
+
+# --- re-cura desde raw/ (issue #80) -----------------------------------------
+
+
+def _approve_mapping(mappings: Path, sofascore_id, canonical_id: str) -> None:
+    """Escribe (o amplía) mappings/players.csv con un mapping aprobado a SofaScore."""
+    mappings.mkdir(exist_ok=True)
+    pd.DataFrame(
+        [
+            {
+                "canonical_id": canonical_id,
+                "fuente": "sofascore",
+                "id_en_fuente": str(sofascore_id),
+                "metodo": "manual",
+                "fecha": "2026-07-17",
+            }
+        ]
+    ).to_csv(mappings / "players.csv", index=False)
+
+
+def test_rebuild_matches_applies_new_mapping_without_downloading(tmp_path):
+    storage = storage_at(tmp_path)
+    mappings = tmp_path / "mappings"
+
+    # 1. Backfill sin mappings: baja alineaciones a raw/, canonical_id vacío.
+    backfill_league_season(
+        storage,
+        8,
+        77559,
+        season_year="25/26",
+        mappings_dir=str(mappings),
+        transport=RoutingTransport(backfill_routes()),
+    )
+    before = storage.curated.read_table("player_match_stats")
+    assert (before["canonical_id"] == "").all()
+    player = str(before.iloc[0]["sofascore_player_id"])
+
+    # 2. Se aprueba el mapping de uno de los jugadores del partido.
+    _approve_mapping(mappings, player, "p00001")
+
+    # 3. Re-cura desde raw/ sin transporte: cualquier petición reventaría el test.
+    result = rebuild_matches(storage, mappings_dir=str(mappings))
+    assert result.stats["partidos_recurados"] == 2
+
+    # 4. La fila del jugador mapeado ya lleva canonical_id; el resto sigue huérfano.
+    after = storage.curated.read_table("player_match_stats")
+    assert len(after) == len(before)
+    mapped = after[after["sofascore_player_id"].astype(str) == player]
+    assert not mapped.empty
+    assert (mapped["canonical_id"] == "p00001").all()
+    others = after[after["sofascore_player_id"].astype(str) != player]
+    assert (others["canonical_id"] == "").all()
+
+
+def test_rebuild_matches_reproduces_backfill_rows(tmp_path):
+    storage = storage_at(tmp_path)
+    mappings = str(tmp_path / "mappings")
+    backfill_league_season(
+        storage,
+        8,
+        77559,
+        season_year="25/26",
+        mappings_dir=mappings,
+        transport=RoutingTransport(backfill_routes()),
+    )
+    baseline = storage.curated.read_table("player_match_stats")
+
+    # Sin cambios de mapping ni de lógica, la re-cura deja la tabla igual (mismas
+    # filas, misma partición): es idempotente y reconstruye desde raw/.
+    result = rebuild_matches(storage, mappings_dir=mappings)
+    assert result.rows["player_match_stats"] == 92
+    rebuilt = storage.curated.read_table("player_match_stats")
+
+    key = ["sofascore_player_id", "event_id"]
+    left = baseline.sort_values(key).reset_index(drop=True)
+    right = rebuilt.sort_values(key).reset_index(drop=True)
+    pd.testing.assert_frame_equal(left[key], right[key])
+    assert set(right["season_year"]) == {"25/26"}
 
 
 # --- cruce de minutos vs Biwenger -------------------------------------------

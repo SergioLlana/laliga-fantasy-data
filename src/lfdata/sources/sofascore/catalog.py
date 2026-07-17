@@ -201,8 +201,10 @@ def restamp_canonical(storage: Storage, mappings_dir: str = "mappings") -> Inges
     Tras una ronda de ``lfdata map``, las filas ya curadas siguen con el
     ``sofascore_player_id`` pero sin ``canonical_id``. Esto **no** re-descarga ni
     relee ``raw/``: cruza la tabla curada con los mappings aprobados y reescribe la
-    partición cambiando solo esa columna de join (la re-cura de verdad desde raw es
-    #80). Es idempotente: sin cambios de mapping, deja las tablas igual.
+    partición cambiando solo esa columna de join. La re-cura de verdad desde raw/
+    —que rehace la fila entera y recoge cualquier cambio de la lógica de curado— es
+    :func:`~lfdata.sources.sofascore.ingest.rebuild_matches`. Es idempotente: sin
+    cambios de mapping, deja las tablas igual.
     """
     store = MappingStore(Path(mappings_dir))
     store.load()

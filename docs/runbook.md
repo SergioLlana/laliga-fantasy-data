@@ -72,6 +72,20 @@ uv run lfdata crosscheck sofascore-biwenger-minutes --out crosscheck.json
 los pasos 1–2 de una temporada no caben en una ventana. Relanza con `--resume`
 hasta que el comando termine sin descargas nuevas.
 
+**Re-cura del eventing sin re-descargar** (cuando cambia la *lógica* de curado, no
+solo el `canonical_id`): el paso 8 (`sofascore-canonical`) rellena únicamente esa
+columna de join. Si tocas cómo se construye una fila de `player_match_stats` (una
+métrica nueva, un cambio en cómo se deriva un campo…), reconstruye la tabla entera
+desde `raw/` sin pedir nada a la fuente:
+
+```bash
+uv run lfdata curate sofascore-matches   # relee event-lineups de raw/, rehace la fila entera
+```
+
+El backfill (paso 5) sigue saltando la descarga de lo que ya está en `raw/`; este
+comando es el que además re-cura, cumpliendo la convención de [ADR 0003](adr/0003-s3-raw-plus-curated-layers.md)
+(el curado se reconstruye siempre desde raw/).
+
 ## Incremental (temporada 2026, durante la temporada)
 
 ### Tras cada jornada
