@@ -1,0 +1,10 @@
+biwenger_id,biwenger_name,biwenger_team,biwenger_birth_date,sofascore_id,sofascore_name,sofascore_team,sofascore_birth_date,motivo,decision
+18570,Joaquín Muñoz,65,1999-03-10,1749,Joaquín,Real Betis,1981-07-21,fecha-discrepante,skip
+33886,Dani Martín,10,2005-09-26,900670,Dani Martín,Real Betis,1998-07-08,fecha-discrepante,skip
+38966,Nico González,,1998-04-06,954056,Nico González,Valencia,2002-01-03,fecha-discrepante,skip
+41080,Barcia,6,2003-01-19,1084706,Sergio Barcia,Celta Vigo,2000-12-31,fecha-discrepante,skip
+41266,Camara,812,2001-12-07,1142583,Ibrahima Camara,Atlético Madrid,2003-01-18,varios-candidatos,skip
+41266,Camara,812,2001-12-07,1151851,Dawda Camara,Girona FC,2002-11-04,varios-candidatos,skip
+41267,Gueye,812,2002-12-30,2162503,Lamine Gueye,Real Oviedo,2004-09-15,fecha-discrepante,skip
+41415,Juanpe Melero,65,1996-03-31,129861,Juanpe,Girona FC,1991-04-30,varios-candidatos,skip
+41415,Juanpe Melero,65,1996-03-31,1165029,Juanpe,Rayo Vallecano,2001-05-05,varios-candidatos,skip
