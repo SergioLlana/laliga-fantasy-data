@@ -129,6 +129,34 @@ def test_upsert_is_idempotent(storage: Storage) -> None:
     assert read["value"].tolist() == [10, 11, 20]
 
 
+def test_upsert_with_composite_key_adds_dates_without_replacing_the_player(
+    storage: Storage,
+) -> None:
+    """Con clave (player_id, date) una ventana parcial añade días sin borrar los viejos.
+
+    Es el contrato que necesita ``biwenger_prices`` (#89): la fuente sirve una
+    ventana móvil y un lote posterior, más corto, no debe vaciar la serie ya
+    acumulada del jugador.
+    """
+    partition = {"competition": "la-liga", "season": "2025"}
+    first = pd.DataFrame(
+        {"player_id": [1, 1], "date": ["2025-07-01", "2025-07-02"], "price": [10, 11]}
+    )
+    storage.curated.upsert_table("prices", first, key=("player_id", "date"), partition=partition)
+
+    update = pd.DataFrame(
+        {"player_id": [1, 1], "date": ["2025-07-02", "2025-07-03"], "price": [20, 30]}
+    )
+    storage.curated.upsert_table("prices", update, key=("player_id", "date"), partition=partition)
+
+    read = storage.curated.read_table("prices").sort_values("date")
+    assert list(zip(read["date"], read["price"], strict=True)) == [
+        ("2025-07-01", 10),  # conservado aunque el segundo lote ya no lo trae
+        ("2025-07-02", 20),  # actualizado
+        ("2025-07-03", 30),  # añadido
+    ]
+
+
 def test_upsert_with_custom_key(storage: Storage) -> None:
     storage.curated.upsert_table("players", pd.DataFrame({"id": [1, 2], "n": ["a", "b"]}), key="id")
     storage.curated.upsert_table("players", pd.DataFrame({"id": [2], "n": ["B"]}), key="id")

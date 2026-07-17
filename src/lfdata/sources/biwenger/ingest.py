@@ -188,12 +188,28 @@ def _points_rows(detail: PlayerDetail) -> list[dict]:
     return rows
 
 
-def _price_rows(detail: PlayerDetail) -> list[dict]:
-    """Una fila por día con precio."""
-    return [
-        {"player_id": detail.id, "date": _date_from_biwenger(stamp), "price": price}
-        for stamp, price in detail.prices
-    ]
+def _season_of_price(day: date) -> str:
+    """Año de inicio de la temporada a la que pertenece una fecha (corte: 1 de julio)."""
+    return str(day.year if day.month >= 7 else day.year - 1)
+
+
+def _price_rows(detail: PlayerDetail, season: str) -> list[dict]:
+    """Una fila por día con precio, solo de los días de la temporada pedida.
+
+    La API ignora ``season`` en el campo ``prices``: siempre devuelve la ventana
+    móvil de los últimos ~366 días (#89). La temporada de cada precio se deriva
+    de su fecha y solo se curan los días que caen en la temporada que se está
+    ingiriendo. Así, un backfill de temporada pasada no produce filas (la
+    ventana ya no la cubre) en lugar de etiquetar precios actuales con una
+    temporada antigua; el histórico real solo se acumula hacia delante, con la
+    ingesta periódica de la temporada en curso.
+    """
+    rows = []
+    for stamp, price in detail.prices:
+        day = _date_from_biwenger(stamp)
+        if _season_of_price(day) == season:
+            rows.append({"player_id": detail.id, "date": day, "price": price})
+    return rows
 
 
 def _points_frame(rows: list[dict]) -> pd.DataFrame:
@@ -258,15 +274,19 @@ def _refresh_players(
                 key="id",
                 partition={"competition": competition},
             )
-        if not batch_points and not batch_prices:
-            batch_players.clear()
-            return
-        storage.curated.upsert_table(
-            "fantasy_points", _points_frame(batch_points), key="player_id", partition=partition
-        )
-        storage.curated.upsert_table(
-            "biwenger_prices", _prices_frame(batch_prices), key="player_id", partition=partition
-        )
+        if batch_points:
+            storage.curated.upsert_table(
+                "fantasy_points", _points_frame(batch_points), key="player_id", partition=partition
+            )
+        if batch_prices:
+            # Clave compuesta: la serie de precios es una ventana móvil y un lote
+            # posterior con ventana más corta debe añadir días, no borrar los viejos.
+            storage.curated.upsert_table(
+                "biwenger_prices",
+                _prices_frame(batch_prices),
+                key=("player_id", "date"),
+                partition=partition,
+            )
         result.rows["fantasy_points"] += len(batch_points)
         result.rows["biwenger_prices"] += len(batch_prices)
         batch_points.clear()
@@ -288,7 +308,7 @@ def _refresh_players(
             )
             continue
         batch_points.extend(_points_rows(detail))
-        batch_prices.extend(_price_rows(detail))
+        batch_prices.extend(_price_rows(detail, season))
         batch_players.append(player)
         births[player.id] = _birthday_to_iso(detail.birthday)
         incomplete = _points_without_stats(detail)

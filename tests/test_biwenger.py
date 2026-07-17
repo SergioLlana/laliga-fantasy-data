@@ -1,7 +1,9 @@
 """Tests del cliente e ingesta de Biwenger contra fixtures reales, sin red."""
 
 import json
+from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -16,7 +18,7 @@ from lfdata.sources.biwenger import (
     ingest_rounds,
     ingest_squad,
 )
-from lfdata.sources.biwenger.ingest import COACH_POSITION, REFRESHED, SKIPPED
+from lfdata.sources.biwenger.ingest import COACH_POSITION, REFRESHED, SKIPPED, _price_rows
 from lfdata.sources.http import SourceHTTPError
 from lfdata.storage import Storage
 
@@ -326,7 +328,7 @@ def test_ingest_reports_writes_both_tables(storage: Storage, tmp_path: Path) -> 
     prices = storage.curated.read_table("biwenger_prices")
     assert set(prices.columns) >= {"player_id", "date", "price"}
     first = prices.sort_values("date").iloc[0]
-    assert str(first["date"]) == "2025-07-21"  # AAMMDD 250721
+    assert str(first["date"]) == "2026-07-21"  # AAMMDD 260721
     assert first["price"] == 230000
 
 
@@ -356,6 +358,35 @@ def test_ingest_reports_is_idempotent(storage: Storage) -> None:
     # La partición (competition, season) se reescribe entera: sin duplicados.
     assert len(storage.curated.read_table("fantasy_points")) == 3
     assert len(storage.curated.read_table("biwenger_prices")) == 4
+
+
+def test_ingest_reports_past_season_curates_points_but_no_prices(storage: Storage) -> None:
+    """El backfill de una temporada pasada cura puntos y cero precios (#89).
+
+    La API ignora ``season`` en ``prices`` y devuelve siempre la ventana móvil
+    de los últimos ~366 días: para una temporada que la ventana ya no cubre no
+    hay precios que curar, y antes se etiquetaban los precios de hoy con la
+    temporada pedida (particiones season=2021/2022 con fechas de 2025/26).
+    """
+    transport = RoutingTransport(_competition_payload("alex-fores"), PLAYER_LA_LIGA.read_bytes())
+    result = ingest_reports(storage, "la-liga", "2021", transport=transport)
+
+    assert result.rows == {"fantasy_points": 3, "biwenger_prices": 0}
+    with pytest.raises(FileNotFoundError):  # ni siquiera una partición vacía
+        storage.curated.read_table("biwenger_prices")
+
+
+def test_price_rows_keep_only_days_of_the_requested_season() -> None:
+    """La temporada de cada precio sale de su fecha, con corte el 1 de julio."""
+    detail = SimpleNamespace(id=7, prices=[[260630, 100], [260701, 200], [260715, 300]])
+
+    assert _price_rows(detail, "2025") == [
+        {"player_id": 7, "date": date(2026, 6, 30), "price": 100}
+    ]
+    assert [row["date"] for row in _price_rows(detail, "2026")] == [
+        date(2026, 7, 1),
+        date(2026, 7, 15),
+    ]
 
 
 # --- fecha de nacimiento desde el detalle (#37) -----------------------------
@@ -421,7 +452,7 @@ def _detail_with_reports(reports: list[dict]) -> bytes:
                 "slug": "alex-fores",
                 "birthday": 20010412,
                 "reports": reports,
-                "prices": [[250721, 230000]],
+                "prices": [[260721, 230000]],
             },
         }
     ).encode()
@@ -1170,7 +1201,7 @@ def _detail_scoring_round(player_id: int, slug: str, round_id: int, match_id: in
                         "rawStats": _DELTA_STATS,
                     }
                 ],
-                "prices": [[250721, 230000]],
+                "prices": [[260721, 230000]],
             },
         }
     ).encode()
