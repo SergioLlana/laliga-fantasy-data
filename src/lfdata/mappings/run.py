@@ -97,6 +97,7 @@ class MapReport:
     sofascore_teams_review: int = 0
     sofascore_players_mapped: int = 0
     sofascore_players_review: int = 0
+    sofascore_skipped: int = 0
     sofascore_unresolved: int = 0
     unapplied: list[UnappliedDecision] = field(default_factory=list)
 
@@ -122,10 +123,13 @@ class MapReport:
             f"{self.players_review} en revisión, {self.players_pending} pendientes",
         ]
         if self.sofascore_present:
+            revisar = f"{self.sofascore_teams_review + self.sofascore_players_review} en revisión"
+            if self.sofascore_skipped:
+                revisar += f", {self.sofascore_skipped} sin contraparte"
             lines.append(
                 f"SofaScore: {self.sofascore_teams_mapped} equipos y "
                 f"{self.sofascore_players_mapped} jugadores colgados del canónico "
-                f"({self.sofascore_teams_review + self.sofascore_players_review} en revisión) — "
+                f"({revisar}) — "
                 f"{self.sofascore_unresolved} IDs de SofaScore sin resolver"
             )
         if self.unapplied:
@@ -798,13 +802,28 @@ def _biwenger_ids_with_source(df: pd.DataFrame, source: str) -> set[str]:
     return set(biw.loc[biw["canonical_id"].isin(with_source), "id_en_fuente"])
 
 
+def _biwenger_ids_skipped(df: pd.DataFrame, skips: pd.DataFrame) -> set[str]:
+    """Ids de Biwenger cuyo canónico está marcado como sin contraparte en SofaScore.
+
+    El registro negativo (ADR 0011) los da por resueltos igual que un mapping: sin
+    esto reaparecerían en revisión cada pasada (#94). El fichero de skips es único
+    para jugadores y equipos; ``isin`` sobre ``canonical_id`` filtra por tipo solo
+    (``p…`` no cruza con equipos ni ``t…`` con jugadores).
+    """
+    skipped = set(skips["canonical_id"])
+    biw = df[df["fuente"] == BIWENGER]
+    return set(biw.loc[biw["canonical_id"].isin(skipped), "id_en_fuente"])
+
+
 def _map_teams_sofascore(
     store: MappingStore, biw_teams: pd.DataFrame, so_teams: pd.DataFrame, today: str
 ) -> list[UnappliedDecision]:
     """Cuelga cada equipo de SofaScore del canónico del equipo de Biwenger."""
     clubs = _clubs(so_teams, id_col="team_id", name_col="team_name")
     biw_canonical = store.canonical_by_source(store.teams, BIWENGER)
-    resolved = _biwenger_ids_with_source(store.teams, SOFASCORE)
+    resolved = _biwenger_ids_with_source(store.teams, SOFASCORE) | _biwenger_ids_skipped(
+        store.teams, store.sofascore_skips
+    )
     taken = store.approved_ids(store.teams, SOFASCORE)
     old_review = store.teams_review_sofascore
 
@@ -814,6 +833,7 @@ def _map_teams_sofascore(
         taken,
         biw_canonical,
         store.add_team,
+        store.add_sofascore_skip,
         "equipo",
         "sofascore_team_id",
         today,
@@ -893,19 +913,23 @@ def _map_players_sofascore(
                 so_by_canonical[canonical].append(_so_record(row))
     pool = _global_pool(so_all, id_col="sofascore_player_id", record=_so_record)
 
-    resolved = _biwenger_ids_with_source(store.players, SOFASCORE)
+    resolved = _biwenger_ids_with_source(store.players, SOFASCORE) | _biwenger_ids_skipped(
+        store.players, store.sofascore_skips
+    )
     taken = store.approved_ids(store.players, SOFASCORE)
     old_review = store.players_review_sofascore
 
-    # ``y`` cuelga el id de SofaScore del canónico de Biwenger; ``skip`` confirma que
-    # el jugador no tiene contraparte (lo da por resuelto sin añadir nada). Un ``y``
-    # sobre un Biwenger todavía sin canónico no se aplica (biwenger-sin-canonico).
+    # ``y`` cuelga el id de SofaScore del canónico de Biwenger; ``skip`` registra en
+    # sofascore-skips.csv que el jugador no tiene contraparte (persistente, ADR 0011).
+    # Un ``y``/``skip`` sobre un Biwenger todavía sin canónico no se aplica
+    # (biwenger-sin-canonico).
     unapplied = _apply_source_decisions(
         old_review,
         resolved,
         taken,
         biw_canonical,
         store.add_player,
+        store.add_sofascore_skip,
         "jugador",
         "sofascore_id",
         today,
@@ -982,6 +1006,7 @@ def _apply_source_decisions(
     taken: set[str],
     biw_canonical: dict[str, str],
     add_fn,
+    skip_fn,
     kind: str,
     source_id_attr: str,
     today: str,
@@ -1033,7 +1058,26 @@ def _apply_source_decisions(
             add_fn(canonical, [(SOFASCORE, source_id)], method="manual", date=today)
             resolved.add(biw_id)
             taken.add(source_id)
-        else:  # skip: se confirma que no tiene contraparte en SofaScore
+        else:  # skip: no tiene contraparte en SofaScore — se registra por canónico
+            name = str(marked[0][0].biwenger_name)
+            canonical = biw_canonical.get(biw_id)
+            if not canonical:
+                # Sin canónico no hay dónde anclar el hecho negativo (su Transfermarkt
+                # sigue en revisión): se conserva la decisión y se reporta, como el ``y``.
+                unapplied.append(
+                    UnappliedDecision(
+                        kind=kind,
+                        biwenger_id=biw_id,
+                        biwenger_name=name,
+                        tm_id="",
+                        decision="skip",
+                        motivo="biwenger-sin-canonico",
+                    )
+                )
+                continue
+            # Persistente (ADR 0011): sin esto, ``resolved`` se recalcula cada pasada
+            # desde los mapeos existentes y el jugador volvería a proponerse (#94).
+            skip_fn(canonical, name, today)
             resolved.add(biw_id)
     return unapplied
 
@@ -1070,6 +1114,7 @@ def _report(
         sofascore_teams_review=store.teams_review_sofascore["biwenger_id"].nunique(),
         sofascore_players_mapped=int((store.players["fuente"] == SOFASCORE).sum()),
         sofascore_players_review=store.players_review_sofascore["biwenger_id"].nunique(),
+        sofascore_skipped=len(store.sofascore_skips),
         sofascore_unresolved=len(so_ids - so_mapped),
     )
 

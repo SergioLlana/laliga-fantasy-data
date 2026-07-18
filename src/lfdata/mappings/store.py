@@ -72,6 +72,14 @@ SOFASCORE_TEAM_REVIEW_COLUMNS = [
     "decision",
 ]
 
+# Registro negativo de SofaScore (ADR 0011): "este canónico no tiene contraparte en
+# SofaScore". A diferencia de Transfermarkt —donde el skip crea un canónico
+# solo-Biwenger que ya persiste en players.csv—, aquí el canónico ya existe y no hay
+# dónde anotar la ausencia, así que va a su propio fichero, keyed por canónico. Un
+# solo fichero cubre jugadores y equipos: el prefijo del canonical_id (``p…``/``t…``)
+# distingue el tipo.
+SOFASCORE_SKIP_COLUMNS = ["canonical_id", "biwenger_name", "fecha"]
+
 BIWENGER = "biwenger"
 TRANSFERMARKT = "transfermarkt"
 SOFASCORE = "sofascore"
@@ -127,6 +135,41 @@ def _integrity_problems(df: pd.DataFrame, fichero: str, pattern: re.Pattern[str]
     return problems
 
 
+def _sofascore_skip_problems(
+    skips: pd.DataFrame, players: pd.DataFrame, teams: pd.DataFrame
+) -> list[str]:
+    """Problemas de integridad de ``sofascore-skips.csv``; vacío = correcto.
+
+    Extiende la relación de ADR 0001 con el hecho negativo: un canónico tiene como
+    máximo un mapping **o un skip** por fuente. Un fichero editado a mano que rompa
+    esto hace fallar el comando señalando el canónico.
+    """
+    problems: list[str] = []
+    if skips.empty:
+        return problems
+
+    dup = skips[skips.duplicated(subset=["canonical_id"], keep=False)]
+    for canonical_id in sorted(set(dup["canonical_id"])):
+        problems.append(f"sofascore-skips.csv: canonical_id repetido: {canonical_id}")
+
+    for canonical_id in sorted(set(skips["canonical_id"])):
+        cid = str(canonical_id)
+        if not (_PLAYER_CANONICAL.match(cid) or _TEAM_CANONICAL.match(cid)):
+            problems.append(
+                f"sofascore-skips.csv: canonical_id con formato no reconocible: {cid!r}"
+            )
+
+    # Contradicción: un canónico no puede estar a la vez skipeado y mapeado a SofaScore.
+    mapped = set(players.loc[players["fuente"] == SOFASCORE, "canonical_id"]) | set(
+        teams.loc[teams["fuente"] == SOFASCORE, "canonical_id"]
+    )
+    for canonical_id in sorted(set(skips["canonical_id"]) & mapped):
+        problems.append(
+            f"sofascore-skips.csv: {canonical_id} tiene skip y a la vez un mapping de sofascore"
+        )
+    return problems
+
+
 def _read_csv(path: Path, columns: list[str]) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame(columns=columns)
@@ -148,6 +191,7 @@ class MappingStore:
         self.teams_review = pd.DataFrame(columns=TEAM_REVIEW_COLUMNS)
         self.players_review_sofascore = pd.DataFrame(columns=SOFASCORE_PLAYER_REVIEW_COLUMNS)
         self.teams_review_sofascore = pd.DataFrame(columns=SOFASCORE_TEAM_REVIEW_COLUMNS)
+        self.sofascore_skips = pd.DataFrame(columns=SOFASCORE_SKIP_COLUMNS)
 
     # --- IO ------------------------------------------------------------------
 
@@ -162,12 +206,14 @@ class MappingStore:
         self.teams_review_sofascore = _read_csv(
             self.root / "sofascore-teams-review.csv", SOFASCORE_TEAM_REVIEW_COLUMNS
         )
+        self.sofascore_skips = _read_csv(self.root / "sofascore-skips.csv", SOFASCORE_SKIP_COLUMNS)
         self.validate()
 
     def validate(self) -> None:
         """Falla si los aprobados violan la integridad del dominio (ADR 0001)."""
         problems = _integrity_problems(self.players, "players.csv", _PLAYER_CANONICAL)
         problems += _integrity_problems(self.teams, "teams.csv", _TEAM_CANONICAL)
+        problems += _sofascore_skip_problems(self.sofascore_skips, self.players, self.teams)
         if problems:
             raise MappingIntegrityError(problems)
 
@@ -185,6 +231,9 @@ class MappingStore:
         )
         self._save_if_relevant(
             self.players_review_sofascore.sort_values("biwenger_id"), "sofascore-review.csv"
+        )
+        self._save_if_relevant(
+            self.sofascore_skips.sort_values("canonical_id"), "sofascore-skips.csv"
         )
 
     def _save(self, df: pd.DataFrame, name: str) -> None:
@@ -230,6 +279,21 @@ class MappingStore:
         self, canonical_id: str, pairs: list[tuple[str, str]], *, method: str, date: str
     ) -> None:
         self.teams = self._append(self.teams, canonical_id, pairs, method, date)
+
+    def add_sofascore_skip(self, canonical_id: str, biwenger_name: str, date: str) -> None:
+        """Registra que ``canonical_id`` no tiene contraparte en SofaScore (ADR 0011).
+
+        Persiste el ``skip`` de la revisión de SofaScore para que ``map`` no vuelva a
+        proponer al jugador/equipo entre ejecuciones. Idempotente: no duplica un
+        canónico ya skipeado. Reabrir el skip = borrar su fila del fichero.
+        """
+        if canonical_id in set(self.sofascore_skips["canonical_id"]):
+            return
+        row = {"canonical_id": canonical_id, "biwenger_name": biwenger_name, "fecha": date}
+        self.sofascore_skips = pd.concat(
+            [self.sofascore_skips, pd.DataFrame([row], columns=SOFASCORE_SKIP_COLUMNS)],
+            ignore_index=True,
+        )
 
     @staticmethod
     def _append(

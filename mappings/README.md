@@ -45,6 +45,7 @@ competía con su hijo *Giuliano* por la misma ficha de Transfermarkt.
 | `players.csv` / `teams.csv` | Mappings **aprobados** (todas las fuentes). Formato largo: una fila por `(fuente, id_en_fuente)`, todas con el mismo `canonical_id`. `metodo` es `auto` o `manual`. |
 | `players-review.csv` / `teams-review.csv` | **Candidatos dudosos** de Transfermarkt, con sus evidencias y una columna `decision` vacía. |
 | `sofascore-review.csv` / `sofascore-teams-review.csv` | Igual, para SofaScore: la evidencia trae los dos lados (nombre, equipo y fecha de nacimiento de Biwenger y de SofaScore). Solo se escriben cuando hay catálogo de SofaScore que revisar. |
+| `sofascore-skips.csv` | Registro negativo de SofaScore ([ADR 0011](../docs/adr/0011-registro-negativo-de-sofascore.md)): canónicos que **no tienen contraparte** en SofaScore. Uno por `canonical_id` (el prefijo `p…`/`t…` distingue jugador de equipo). Reabrir un skip = borrar su fila. |
 
 ## SofaScore
 
@@ -55,12 +56,16 @@ alineaciones. Se publica aparte, desde raw/ y sin peticiones, con
 `sofascore_players` y `sofascore_teams`— con la cobertura de lo backfilleado
 (La Liga/Segunda). `lfdata map` las lee como lee las de Transfermarkt.
 
-Un `y`/`skip` en `sofascore-review.csv` funciona igual que en Transfermarkt, con un
-motivo extra posible: `biwenger-sin-canonico` (marcaste `y` pero el jugador de
-Biwenger aún no tiene canónico porque su Transfermarkt sigue en revisión; resuélvelo
-primero). Tras aprobar mappings nuevos, `lfdata curate sofascore-canonical` rellena
-el `canonical_id` de `player_match_stats`/`player_season_stats` cruzándolas con los
-mappings (sin releer raw/).
+En `sofascore-review.csv`, `y` cuelga el `sofascore_id` del canónico. El `skip`, en
+cambio, **no** puede crear un canónico solo-Biwenger como en Transfermarkt (aquí el
+canónico ya existe): registra el hecho negativo en `sofascore-skips.csv`, por
+`canonical_id` ([ADR 0011](../docs/adr/0011-registro-negativo-de-sofascore.md)), y así
+`map` no vuelve a proponer al jugador entre ejecuciones. Motivo extra posible en ambos:
+`biwenger-sin-canonico` (marcaste `y`/`skip` pero el jugador de Biwenger aún no tiene
+canónico porque su Transfermarkt sigue en revisión; resuélvelo primero). Tras aprobar
+mappings nuevos, `lfdata curate sofascore-canonical` rellena el `canonical_id` de
+`player_match_stats`/`player_season_stats` cruzándolas con los mappings (sin releer
+raw/).
 
 ## Flujo
 
