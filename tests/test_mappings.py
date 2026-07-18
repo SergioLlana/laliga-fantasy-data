@@ -1006,6 +1006,195 @@ def test_sofascore_waits_for_biwenger_canonical(storage: Storage, tmp_path: Path
     assert report.sofascore_unresolved == 1  # el id 5000 sigue sin resolver
 
 
+# --- skip persistente de SofaScore (registro negativo, ADR 0011 / #94) -------
+
+
+def _seed_sofascore_review_candidate(storage: Storage) -> None:
+    """Williams mapeado a TM; un candidato de SofaScore con fecha discrepante va a revisión."""
+    seed(
+        storage,
+        teams=BASIC_TEAMS,
+        players=[{"id": 100, "name": "Williams", "team_id": 1, "birth_date": "1994-06-15"}],
+        tm_players=BASIC_TM,
+    )
+    seed_sofascore(
+        storage,
+        teams=ATHLETIC_SO_TEAM,
+        players=[
+            {
+                "sofascore_player_id": 5000,
+                "name": "Iñaki Williams",
+                "birth_date": "1990-01-01",  # discrepa: va a revisión, no se auto-aprueba
+                "team_id": 900,
+                "team_name": "Athletic Bilbao",
+            }
+        ],
+    )
+
+
+def test_sofascore_skip_persists_across_runs(storage: Storage, tmp_path: Path) -> None:
+    """Regresión #94: un `skip` de SofaScore no reaparece en la siguiente pasada."""
+    mappings = tmp_path / "mappings"
+    _seed_sofascore_review_candidate(storage)
+    run_map(storage, mappings)
+
+    review = pd.read_csv(mappings / "sofascore-review.csv", dtype=str, keep_default_na=False)
+    review.loc[review["sofascore_id"] == "5000", "decision"] = "skip"
+    review.to_csv(mappings / "sofascore-review.csv", index=False)
+
+    report = run_map(storage, mappings)
+
+    store = MappingStore(mappings)
+    store.load()
+    canonical = store.canonical_by_source(store.players, "biwenger")["100"]
+    assert store.sofascore_skips["canonical_id"].tolist() == [canonical]
+    assert store.players[store.players["fuente"] == "sofascore"].empty  # el skip no cuelga nada
+    assert store.players_review_sofascore.empty  # ya no está en revisión
+    assert report.sofascore_skipped == 1
+    assert report.sofascore_players_review == 0
+
+    # Segunda pasada: el skip persiste, no reaparece en revisión ni se duplica.
+    report2 = run_map(storage, mappings)
+    store2 = MappingStore(mappings)
+    store2.load()
+    assert store2.players_review_sofascore.empty
+    assert store2.sofascore_skips["canonical_id"].tolist() == [canonical]
+    assert report2.sofascore_skipped == 1
+
+
+def test_sofascore_skip_without_canonical_reported(storage: Storage, tmp_path: Path) -> None:
+    """Un `skip` sobre un Biwenger sin canónico (su TM en duda) no se aplica; se reporta."""
+    mappings = tmp_path / "mappings"
+    seed(
+        storage,
+        teams=[{"id": 1, "name": "Athletic"}],
+        players=[{"id": 100, "name": "Williams", "team_id": 1}],
+        tm_players=TWO_WILLIAMS_TM,  # dos homónimos: biw 100 queda sin canónico
+    )
+    seed_sofascore(
+        storage,
+        teams=ATHLETIC_SO_TEAM,
+        players=[
+            {
+                "sofascore_player_id": 5000,
+                "name": "Iñaki Williams",
+                "birth_date": "1994-06-15",
+                "team_id": 900,
+                "team_name": "Athletic Bilbao",
+            }
+        ],
+    )
+    run_map(storage, mappings)
+    # La revisión de SofaScore no genera fila sin canónico; la escribimos a mano.
+    pd.DataFrame(
+        [
+            {
+                "biwenger_id": "100",
+                "biwenger_name": "Williams",
+                "biwenger_team": "1",
+                "biwenger_birth_date": "",
+                "sofascore_id": "5000",
+                "sofascore_name": "Iñaki Williams",
+                "sofascore_team": "Athletic Bilbao",
+                "sofascore_birth_date": "1994-06-15",
+                "motivo": "manual",
+                "decision": "skip",
+            }
+        ]
+    ).to_csv(mappings / "sofascore-review.csv", index=False)
+
+    report = run_map(storage, mappings)
+
+    store = MappingStore(mappings)
+    store.load()
+    assert store.sofascore_skips.empty  # nada persistido sin canónico
+    assert [u.motivo for u in report.unapplied] == ["biwenger-sin-canonico"]
+    kept = pd.read_csv(mappings / "sofascore-review.csv", dtype=str, keep_default_na=False)
+    assert kept.loc[kept["sofascore_id"] == "5000", "decision"].iloc[0] == "skip"  # no se borra
+
+
+def test_sofascore_skip_contradicts_mapping_fails_integrity(tmp_path: Path) -> None:
+    """Un canónico con skip y a la vez un mapping de sofascore es una contradicción."""
+    mappings = tmp_path / "mappings"
+    mappings.mkdir()
+    pd.DataFrame(
+        [
+            {
+                "canonical_id": "p00001",
+                "fuente": "biwenger",
+                "id_en_fuente": "100",
+                "metodo": "manual",
+                "fecha": "2026-01-01",
+            },
+            {
+                "canonical_id": "p00001",
+                "fuente": "sofascore",
+                "id_en_fuente": "5000",
+                "metodo": "manual",
+                "fecha": "2026-01-01",
+            },
+        ]  # fmt: skip
+    ).to_csv(mappings / "players.csv", index=False)
+    pd.DataFrame(
+        [{"canonical_id": "p00001", "biwenger_name": "Williams", "fecha": "2026-01-01"}]
+    ).to_csv(mappings / "sofascore-skips.csv", index=False)
+
+    store = MappingStore(mappings)
+    with pytest.raises(MappingIntegrityError, match="skip y a la vez"):
+        store.load()
+
+
+def test_sofascore_skip_duplicate_canonical_fails_integrity(tmp_path: Path) -> None:
+    mappings = tmp_path / "mappings"
+    mappings.mkdir()
+    pd.DataFrame(
+        [
+            {"canonical_id": "p00001", "biwenger_name": "A", "fecha": "2026-01-01"},
+            {"canonical_id": "p00001", "biwenger_name": "A", "fecha": "2026-01-02"},
+        ]
+    ).to_csv(mappings / "sofascore-skips.csv", index=False)
+
+    store = MappingStore(mappings)
+    with pytest.raises(MappingIntegrityError, match="repetido"):
+        store.load()
+
+
+def test_sofascore_team_skip_persists(storage: Storage, tmp_path: Path) -> None:
+    """El skip de SofaScore también persiste para equipos (código compartido)."""
+    mappings = tmp_path / "mappings"
+    seed(
+        storage,
+        teams=BASIC_TEAMS,
+        players=[{"id": 100, "name": "Williams", "team_id": 1, "birth_date": "1994-06-15"}],
+        tm_players=BASIC_TM,
+    )
+    seed_sofascore(storage, teams=ATHLETIC_SO_TEAM, players=[])  # sin equipo que case con Oviedo
+    run_map(storage, mappings)
+    # Oviedo (biw 2, con canónico) no tiene contraparte en el catálogo: lo skipeamos a mano.
+    pd.DataFrame(
+        [
+            {
+                "biwenger_id": "2",
+                "biwenger_name": "Oviedo",
+                "competition": "la-liga",
+                "sofascore_team_id": "",
+                "sofascore_team_name": "",
+                "motivo": "sin-candidato",
+                "decision": "skip",
+            }
+        ]
+    ).to_csv(mappings / "sofascore-teams-review.csv", index=False)
+
+    run_map(storage, mappings)
+
+    store = MappingStore(mappings)
+    store.load()
+    canonical = store.canonical_by_source(store.teams, "biwenger")["2"]
+    assert canonical.startswith("t")
+    assert store.sofascore_skips["canonical_id"].tolist() == [canonical]
+    assert store.teams_review_sofascore.empty
+
+
 # --- verificación (--check) --------------------------------------------------
 
 
