@@ -27,6 +27,7 @@ es idempotente: lo ya aprobado se conserva y no se vuelve a proponer.
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -55,6 +56,13 @@ from lfdata.storage import Storage
 
 _YES = frozenset({"y", "yes", "si", "sí", "x", "1", "true", "ok"})
 _SKIP = frozenset({"skip", "none", "no-tm", "biwenger-only", "solo-biwenger"})
+
+# Token de identidad de Transfermarkt: una URL de perfil (``.../profil/spieler/NNN``)
+# o un id numérico pegados en ``decision`` valen como "mapea este Biwenger a ese
+# tm_id" (ergonomía para los ``sin-candidato``, que no traen candidato en la fila).
+# Solo se reconoce en la revisión de jugadores de Transfermarkt (``allow_id``);
+# en equipos y SofaScore sigue siendo ``token-no-reconocido``.
+_SPIELER_RE = re.compile(r"/spieler/(\d+)")
 
 
 @dataclass
@@ -142,12 +150,34 @@ class MapReport:
         return "\n".join(lines)
 
 
-def _decision(value: str) -> str | None:
-    token = str(value).strip().lower()
-    if token in _YES:
+def _decision(value: str, *, allow_id: bool = False):
+    """Interpreta una ``decision`` escrita a mano.
+
+    Devuelve ``"yes"``, ``"skip"``, ``None`` (token no reconocido) o, cuando
+    ``allow_id`` y el texto es una URL de perfil o un id numérico, la tupla
+    ``("id", tm_id)`` —un mapping manual a ese ``tm_id``, aunque la fila no traiga
+    candidato—.
+    """
+    token = str(value).strip()
+    low = token.lower()
+    if low in _YES:
         return "yes"
-    if token in _SKIP:
+    if low in _SKIP:
         return "skip"
+    if allow_id:
+        tm_id = _spieler_id(token)
+        if tm_id is not None:
+            return ("id", tm_id)
+    return None
+
+
+def _spieler_id(token: str) -> str | None:
+    """``tm_id`` de una URL de perfil o de un id numérico; ``None`` si no lo es."""
+    match = _SPIELER_RE.search(token)
+    if match:
+        return match.group(1)
+    if token.isdigit():
+        return token
     return None
 
 
@@ -157,23 +187,37 @@ def _classify_group(marked: list[tuple], tm_id_attr: str, taken: set[str]):
     Devuelve ``(accion, problemas)`` donde ``accion`` es ``("yes", tm_id)``,
     ``("skip", None)`` o ``None`` si no se puede aplicar; ``problemas`` es la
     lista de ``(fila, motivo)`` de las decisiones que no se aplican.
-    """
-    yes = [row for row, d in marked if d == "yes"]
-    skip = [row for row, d in marked if d == "skip"]
-    unknown = [row for row, d in marked if d is None]
 
+    Un token de id (``("id", tm_id)``) es un positivo como el ``y``, pero apunta a
+    su propio ``tm_id`` en vez de al candidato de la fila; si se pega en una fila
+    que **ya** trae candidato, es ambiguo y se rechaza con ``id-en-fila-con-candidato``.
+    """
+    unknown = [row for row, d in marked if d is None]
     if unknown:
         return None, [(row, "token-no-reconocido") for row, _ in marked]
-    if yes and skip:
+
+    yes = [row for row, d in marked if d == "yes"]
+    skip = [row for row, d in marked if d == "skip"]
+    ids = [(row, d[1]) for row, d in marked if isinstance(d, tuple)]
+    positives = len(yes) + len(ids)
+
+    if positives and skip:
         return None, [(row, "y-con-skip") for row, _ in marked]
-    if len(yes) > 1:
-        return None, [(row, "varios-y") for row in yes]
+    if positives > 1:
+        return None, [(row, "varios-y") for row in yes + [r for r, _ in ids]]
     if len(yes) == 1:
         tm_id = str(getattr(yes[0], tm_id_attr) or "")
         if not tm_id:
             return None, [(yes[0], "y-sin-candidato")]
         if tm_id in taken:
             return None, [(yes[0], "tm-id-ya-tomado")]
+        return ("yes", tm_id), []
+    if len(ids) == 1:
+        row, tm_id = ids[0]
+        if str(getattr(row, tm_id_attr) or ""):
+            return None, [(row, "id-en-fila-con-candidato")]
+        if tm_id in taken:
+            return None, [(row, "tm-id-ya-tomado")]
         return ("yes", tm_id), []
     return ("skip", None), []
 
@@ -188,12 +232,14 @@ def _apply_decisions(
     add_fn,
     new_canonical_fn,
     today: str,
+    allow_id: bool = False,
 ) -> list[UnappliedDecision]:
     """Promueve las decisiones válidas a aprobados; reporta las que no lo son.
 
     Las filas de un ``biwenger_id`` con ``decision`` no vacía se clasifican en
-    conjunto: o promueven la identidad (un único ``y`` con candidato libre, o uno
-    o varios ``skip``), o quedan sin aplicar con su motivo.
+    conjunto: o promueven la identidad (un único ``y`` con candidato libre, un id
+    de Transfermarkt pegado, o uno o varios ``skip``), o quedan sin aplicar con su
+    motivo. ``allow_id`` habilita el token de id (solo jugadores de Transfermarkt).
     """
     unapplied: list[UnappliedDecision] = []
     for biw_id, rows in review_df.groupby("biwenger_id"):
@@ -201,7 +247,9 @@ def _apply_decisions(
         if biw_id in approved:
             continue
         marked = [
-            (row, _decision(row.decision)) for row in rows.itertuples() if str(row.decision).strip()
+            (row, _decision(row.decision, allow_id=allow_id))
+            for row in rows.itertuples()
+            if str(row.decision).strip()
         ]
         if not marked:
             continue
@@ -671,6 +719,7 @@ def _map_players(
         add_fn=store.add_player,
         new_canonical_fn=store.new_player_canonical,
         today=today,
+        allow_id=True,
     )
 
     # Grafo bipartito sobre un scope fijo (los no tomados), resuelto por el motor

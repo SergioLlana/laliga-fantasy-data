@@ -136,6 +136,43 @@ def build_parser() -> argparse.ArgumentParser:
     )
     transfermarkt.set_defaults(func=_cmd_ingest_transfermarkt)
 
+    tm_player = ingest_sources.add_parser(
+        "transfermarkt-player",
+        help=(
+            "Historial de un jugador fuera de plantilla (valores, traspasos, "
+            "disponibilidad, lesiones); no toca transfermarkt_players (ADR 0013)"
+        ),
+    )
+    tm_player.add_argument(
+        "--player",
+        required=True,
+        help="Jugador: spieler_id, URL .../profil/spieler/NNN o canonical_id (p00001)",
+    )
+    tm_player.add_argument(
+        "--cached",
+        action="store_true",
+        help="Re-cura desde raw/ sin volver a pedir a la fuente (ADR 0003)",
+    )
+    tm_player.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Cura aunque la fecha de nacimiento del perfil discrepe de la de Biwenger "
+            "(la red de seguridad de identidad; ver ADR 0013)"
+        ),
+    )
+    tm_player.add_argument(
+        "--data",
+        default=os.environ.get("LFDATA_DATA", DEFAULT_DATA_URI),
+        help=f"URI base del almacenamiento (por defecto {DEFAULT_DATA_URI} o $LFDATA_DATA)",
+    )
+    tm_player.add_argument(
+        "--mappings",
+        default=DEFAULT_MAPPINGS_DIR,
+        help=f"Directorio de los ficheros de mappings (por defecto {DEFAULT_MAPPINGS_DIR}/)",
+    )
+    tm_player.set_defaults(func=_cmd_ingest_transfermarkt_player)
+
     tm_values = ingest_sources.add_parser(
         "transfermarkt-values",
         help="Valor total de plantilla por club de las 7 ligas (una petición por liga-temporada)",
@@ -638,6 +675,21 @@ def _cmd_ingest_transfermarkt(args: argparse.Namespace) -> int:
         since_days=args.since_days,
     )
     return _report_ingest(result, args.competition, args.data)
+
+
+def _cmd_ingest_transfermarkt_player(args: argparse.Namespace) -> int:
+    from lfdata.sources.transfermarkt import ingest_player
+    from lfdata.storage import Storage
+
+    storage = Storage(args.data)
+    result = ingest_player(
+        storage,
+        args.player,
+        mappings_dir=args.mappings,
+        cached=args.cached,
+        force=args.force,
+    )
+    return _report_ingest(result, args.player, args.data)
 
 
 def _cmd_ingest_transfermarkt_values(args: argparse.Namespace) -> int:

@@ -17,6 +17,7 @@ from lfdata.sources.transfermarkt import (
     SourceFormatError,
     TransfermarktClient,
     ingest_clubs,
+    ingest_player,
     ingest_squad_values,
     ingest_squads,
 )
@@ -697,6 +698,219 @@ def test_squad_failure_skips_retirement_in_full_refresh(storage: Storage) -> Non
 
     assert any(f.status == 502 for f in result.failures)
     assert 999999 in set(storage.curated.read_table("transfermarkt_players")["id"])
+
+
+# --- ingesta por jugador (fuera de plantilla) --------------------------------
+
+
+def _seed_player_mapping(
+    mappings: Path, *, canonical_id: str, tm_id: int, biwenger_id: int | None = None
+) -> None:
+    mappings.mkdir(exist_ok=True)
+    rows = [
+        {
+            "canonical_id": canonical_id,
+            "fuente": "transfermarkt",
+            "id_en_fuente": str(tm_id),
+            "metodo": "manual",
+            "fecha": "2026-07-17",
+        }
+    ]
+    if biwenger_id is not None:
+        rows.append(
+            {
+                "canonical_id": canonical_id,
+                "fuente": "biwenger",
+                "id_en_fuente": str(biwenger_id),
+                "metodo": "manual",
+                "fecha": "2026-07-17",
+            }
+        )
+    pd.DataFrame(rows).to_csv(mappings / "players.csv", index=False)
+
+
+def test_ingest_player_curates_only_history_tables(storage: Storage, tmp_path: Path) -> None:
+    transport = RoutingTransport(default_routes())
+    result = ingest_player(
+        storage, str(FORES), mappings_dir=str(tmp_path / "mappings"), transport=transport
+    )
+
+    # Las cuatro tablas de historial se curan; transfermarkt_players NUNCA.
+    assert set(result.rows) == {"market_values_tm", "transfers", "availability_tm", "injuries_tm"}
+    assert result.rows["market_values_tm"] == 15
+    assert result.rows["transfers"] == 11
+    assert result.rows["availability_tm"] == 5
+    assert result.rows["injuries_tm"] == 1
+    with pytest.raises(FileNotFoundError):
+        storage.curated.read_table("transfermarkt_players")
+
+    # Aterriza en la partición centinela bajo-demanda (ADR 0013).
+    values = storage.curated.read_table("market_values_tm")
+    assert values["competition"].unique().tolist() == ["bajo-demanda"]
+    assert set(values["player_id"]) == {FORES}
+
+
+def test_ingest_player_accepts_url(storage: Storage, tmp_path: Path) -> None:
+    url = f"https://www.transfermarkt.com/alex-fores/profil/spieler/{FORES}"
+    result = ingest_player(
+        storage,
+        url,
+        mappings_dir=str(tmp_path / "mappings"),
+        transport=RoutingTransport(default_routes()),
+    )
+    assert result.rows["transfers"] == 11
+
+
+def test_ingest_player_accepts_canonical_id(storage: Storage, tmp_path: Path) -> None:
+    mappings = tmp_path / "mappings"
+    _seed_player_mapping(mappings, canonical_id="p00001", tm_id=FORES)
+    result = ingest_player(
+        storage, "p00001", mappings_dir=str(mappings), transport=RoutingTransport(default_routes())
+    )
+    assert set(storage.curated.read_table("transfers")["player_id"]) == {FORES}
+    assert result.rows["injuries_tm"] == 1
+
+
+def test_ingest_player_canonical_without_tm_mapping_errors(
+    storage: Storage, tmp_path: Path
+) -> None:
+    with pytest.raises(ValueError, match="no tiene mapping a Transfermarkt"):
+        ingest_player(
+            storage,
+            "p09999",
+            mappings_dir=str(tmp_path / "mappings"),
+            transport=RoutingTransport(default_routes()),
+        )
+
+
+def test_ingest_player_cached_recures_without_refetching(storage: Storage, tmp_path: Path) -> None:
+    mappings = str(tmp_path / "mappings")
+    ingest_player(
+        storage, str(FORES), mappings_dir=mappings, transport=RoutingTransport(default_routes())
+    )
+    transport = RoutingTransport(default_routes())
+    result = ingest_player(
+        storage, str(FORES), mappings_dir=mappings, transport=transport, cached=True
+    )
+    assert result.rows["transfers"] == 11
+    assert transport.urls == []  # re-curado desde raw/, sin pedir nada
+
+
+def _seed_biwenger_birth_date(storage: Storage, biwenger_id: int, birth_date: str) -> None:
+    df = pd.DataFrame(
+        {
+            "id": [biwenger_id],
+            "name": ["Álex Forés"],
+            "birth_date": pd.to_datetime([birth_date]),
+            "team_id": [1],
+        }
+    )
+    storage.curated.write_table("biwenger_players", df, partition={"competition": "la-liga"})
+
+
+def test_ingest_player_blocks_on_birthdate_discrepancy(storage: Storage, tmp_path: Path) -> None:
+    mappings = tmp_path / "mappings"
+    _seed_player_mapping(mappings, canonical_id="p00001", tm_id=FORES, biwenger_id=42)
+    # Biwenger dice una fecha distinta de la del perfil de Transfermarkt (2001-04-12).
+    _seed_biwenger_birth_date(storage, 42, "1999-01-01")
+
+    result = ingest_player(
+        storage,
+        str(FORES),
+        mappings_dir=str(mappings),
+        transport=RoutingTransport(default_routes()),
+    )
+    # No se cura nada; se cuenta como anomalía visible.
+    assert result.rows["transfers"] == 0
+    assert result.anomalies
+    with pytest.raises(FileNotFoundError):
+        storage.curated.read_table("transfers")
+
+
+def test_ingest_player_force_ingests_despite_discrepancy(storage: Storage, tmp_path: Path) -> None:
+    mappings = tmp_path / "mappings"
+    _seed_player_mapping(mappings, canonical_id="p00001", tm_id=FORES, biwenger_id=42)
+    _seed_biwenger_birth_date(storage, 42, "1999-01-01")
+
+    result = ingest_player(
+        storage,
+        str(FORES),
+        mappings_dir=str(mappings),
+        transport=RoutingTransport(default_routes()),
+        force=True,
+    )
+    assert result.rows["transfers"] == 11
+    assert set(storage.curated.read_table("transfers")["player_id"]) == {FORES}
+
+
+def test_ingest_player_matching_birthdate_curates(storage: Storage, tmp_path: Path) -> None:
+    mappings = tmp_path / "mappings"
+    _seed_player_mapping(mappings, canonical_id="p00001", tm_id=FORES, biwenger_id=42)
+    _seed_biwenger_birth_date(storage, 42, "2001-04-12")  # coincide con el perfil
+    result = ingest_player(
+        storage,
+        str(FORES),
+        mappings_dir=str(mappings),
+        transport=RoutingTransport(default_routes()),
+    )
+    assert result.rows["transfers"] == 11
+
+
+def test_ingest_player_moves_active_player_out_of_league_partition(
+    storage: Storage, tmp_path: Path
+) -> None:
+    """El upsert global no deja al jugador duplicado si ya estaba en otra partición."""
+    # Primero se le alcanza desde La Liga (ingesta por competición).
+    ingest_squads(
+        storage, "la-liga", season=2025, transport=RoutingTransport(default_routes()), max_clubs=1
+    )
+    # Forés (709380) no está en el Madrid-fixture, así que lo sembramos en la-liga a mano.
+    seeded = pd.DataFrame(
+        {"player_id": [FORES], "date": pd.to_datetime(["2025-01-01"]), "value": [1]}
+    )
+    storage.curated.upsert_unique_partition(
+        "market_values_tm", seeded, partition={"competition": "la-liga"}
+    )
+    assert (storage.curated.read_table("market_values_tm")["player_id"] == FORES).sum() == 1
+
+    # Ahora por id: se mueve a bajo-demanda, sin quedar en dos particiones.
+    ingest_player(
+        storage,
+        str(FORES),
+        mappings_dir=str(tmp_path / "mappings"),
+        transport=RoutingTransport(default_routes()),
+    )
+    market = storage.curated.read_table("market_values_tm")
+    fores = market[market["player_id"] == FORES]
+    assert fores["competition"].unique().tolist() == ["bajo-demanda"]
+
+
+def test_cli_ingest_player_end_to_end(tmp_path: Path, monkeypatch, capsys) -> None:
+    routes = default_routes()
+
+    def fake_get(self, url, params=None):
+        for needle, payload in routes.items():
+            if needle in url:
+                return payload
+        raise AssertionError(f"URL sin fixture: {url}")
+
+    monkeypatch.setattr("lfdata.sources.http.HttpTransport.get", fake_get)
+    exit_code = main(
+        [
+            "ingest",
+            "transfermarkt-player",
+            "--player",
+            str(FORES),
+            "--data",
+            f"file://{tmp_path}",
+        ]
+    )
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "transfers: 11 filas" in out
+    parquet = tmp_path / "curated" / "transfers" / "competition=bajo-demanda" / "data.parquet"
+    assert parquet.exists()
+    assert not (tmp_path / "curated" / "transfermarkt_players").exists()
 
 
 def test_cli_ingest_404_exit_code(tmp_path: Path, monkeypatch, capsys) -> None:

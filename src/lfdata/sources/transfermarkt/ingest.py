@@ -15,6 +15,7 @@ mapping a IDs canónicos es un paso posterior):
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -45,6 +46,20 @@ DEFAULT_SEASON = 2026
 
 SQUAD_VALUES_TABLE = "squad_values"
 TRANSFERMARKT = "transfermarkt"
+
+# Partición centinela de las tablas de historial para el jugador alcanzado por id,
+# no por plantilla (ADR 0013): no pertenece a ningún kader descargado, así que su
+# competición de crawl es "bajo demanda". Cuando aparezca luego en un kader de
+# la-liga, ``_ingest_clubs`` lo mueve a esa partición (invariante de unicidad).
+BAJO_DEMANDA = "bajo-demanda"
+
+# Las cuatro tablas de historial de carrera completa (no ``transfermarkt_players``,
+# que es pertenencia a plantilla): las únicas que cura la ingesta por jugador.
+HISTORY_TABLES = ("market_values_tm", "transfers", "availability_tm", "injuries_tm")
+
+_CANONICAL_RE = re.compile(r"^p\d+$")
+# ``.../profil/spieler/NNN`` (y cualquier URL de Transfermarkt con ``/spieler/NNN``).
+_SPIELER_RE = re.compile(r"/spieler/(\d+)")
 
 # Cada tabla es un snapshot de historia completa por jugador; el upsert por club
 # la actualiza clave a clave. ``transfermarkt_players`` se indexa por ``id``.
@@ -195,6 +210,203 @@ def ingest_clubs(
         len(result.failures),
     )
     return result
+
+
+def ingest_player(
+    storage: Storage,
+    query: str,
+    *,
+    mappings_dir: str = "mappings",
+    transport: HttpTransport | None = None,
+    cached: bool = False,
+    force: bool = False,
+) -> IngestResult:
+    """Ingesta dirigida del **historial** de un jugador, sin pertenencia a plantilla.
+
+    Espejo del ``--player`` de SofaScore para el jugador que no está en ninguna
+    plantilla descargada (los ``sin-candidato`` enlazados a mano, y el goteo de
+    fichajes de Segunda/extranjero antes de aparecer en el kader). Cura **solo las
+    cuatro tablas de historial** (:data:`HISTORY_TABLES`) —de carrera completa, no
+    por competición (docs/experiments/2026-07-07-alex-fores.md)— y **nunca**
+    ``transfermarkt_players``, que es pertenencia a plantilla (ADR 0005). ~5
+    peticiones por jugador.
+
+    ``query`` es un ``spieler_id`` numérico, una URL de perfil
+    (``.../profil/spieler/NNN``) o un ``canonical_id`` (``p00001``, que se resuelve a
+    su ``tm_id`` mapeado). ``cached`` re-cura desde ``raw/`` sin volver a pedir
+    (ADR 0003).
+
+    Red de seguridad de identidad (ADR 0013 / pieza del token que aprueba sin
+    verificar): si el jugador tiene canónico con mapping de Biwenger, se contrasta
+    la fecha de nacimiento del perfil con la de Biwenger y, si discrepa, no se cura
+    nada salvo ``--force``.
+
+    El historial va a la partición centinela ``competition=bajo-demanda`` con upsert
+    global por jugador (:meth:`CuratedStore.upsert_unique_partition`): si el jugador
+    ya vivía en otra partición, se le retira de ella para que no quede duplicado.
+    """
+    # Import perezoso: ``lfdata.mappings.run`` importa este módulo (ciclo).
+    from lfdata.mappings import MappingStore
+
+    transport = transport or HttpTransport(
+        wait_seconds=WAIT_SECONDS,
+        overflow_proxy=scrapeops_proxy_from_env(enabled=PROXY_OVERFLOW),
+    )
+    client = TransfermarktClient(transport, storage.raw)
+    store = MappingStore(Path(mappings_dir))
+    store.load()
+
+    player_id = _resolve_player_id(query, store)
+    result = IngestResult(rows=dict.fromkeys(HISTORY_TABLES, 0))
+    try:
+        # El perfil sirve a la vez de red de seguridad (fecha de nacimiento) y de
+        # primera petición del historial; Transfermarkt resuelve por id, así que el
+        # slug vacío basta (el cliente rellena un marcador para la URL).
+        profile = client.fetch_player_profile(player_id, slug="", cached=cached)
+        if not _verify_identity(storage, store, player_id, profile, force=force):
+            result.anomalies["jugadores no curados por fecha de nacimiento discrepante"] = 1
+            return result
+        frames = {
+            "market_values_tm": _values_frame(
+                market_value_rows(
+                    client.fetch_market_value(player_id, cached=cached), player_id=player_id
+                )
+            ),
+            "transfers": _transfers_frame(
+                transfer_rows(client.fetch_transfers(player_id, cached=cached), player_id=player_id)
+            ),
+            "availability_tm": _availability_frame(
+                availability_rows(
+                    client.fetch_performance(player_id, cached=cached), player_id=player_id
+                )
+            ),
+            "injuries_tm": _injuries_frame(
+                [
+                    _injury_record(injury)
+                    for injury in client.fetch_injuries(player_id, slug="", cached=cached)
+                ]
+            ),
+        }
+    except SourceHTTPError as error:
+        result.failures.append(PlayerFailure(f"spieler {player_id}", error.url, error.status))
+        logger.warning(
+            "transfermarkt spieler %d: HTTP %d al pedir su historial, no se cura",
+            player_id,
+            error.status,
+        )
+        return result
+
+    partition = {"competition": BAJO_DEMANDA}
+    for table, frame in frames.items():
+        storage.curated.upsert_unique_partition(
+            table, frame, key=_TABLE_KEYS[table], partition=partition
+        )
+        result.rows[table] = len(frame)
+    logger.info(
+        "transfermarkt spieler %d (%s): historial curado (bajo-demanda) — "
+        "%d valores, %d traspasos, %d disponibilidad, %d lesiones",
+        player_id,
+        profile.name,
+        result.rows["market_values_tm"],
+        result.rows["transfers"],
+        result.rows["availability_tm"],
+        result.rows["injuries_tm"],
+    )
+    return result
+
+
+def _resolve_player_id(query: str, store) -> int:
+    """Resuelve ``query`` a un ``spieler_id`` de Transfermarkt.
+
+    - ``canonical_id`` (``p\\d+``): busca su ``tm_id`` en los mappings aprobados; si
+      no lo tiene, es un error (no hay a quién descargar).
+    - URL ``.../profil/spieler/NNN`` (o cualquier URL con ``/spieler/NNN``): NNN.
+    - numérico: el ``spieler_id`` directo.
+    """
+    if _CANONICAL_RE.match(query):
+        rows = store.players[
+            (store.players["fuente"] == TRANSFERMARKT) & (store.players["canonical_id"] == query)
+        ]
+        if rows.empty:
+            raise ValueError(
+                f"{query} no tiene mapping a Transfermarkt todavía; "
+                "ingiere por id de Transfermarkt o por URL de perfil."
+            )
+        return int(rows.iloc[0]["id_en_fuente"])
+    match = _SPIELER_RE.search(query)
+    if match:
+        return int(match.group(1))
+    if query.isdigit():
+        return int(query)
+    raise ValueError(
+        f"No sé resolver {query!r} a un spieler_id: pasa un id numérico, una URL "
+        ".../profil/spieler/NNN o un canonical_id (pXXXXX)."
+    )
+
+
+def _verify_identity(storage: Storage, store, player_id: int, profile, *, force: bool) -> bool:
+    """Red de seguridad: ¿la fecha de nacimiento del perfil casa con la de Biwenger?
+
+    El token de la revisión (``spieler_id`` en ``decision``) aprueba el mapping sin
+    verificar, así que la comprobación se hace aquí, al curar. Si el jugador no tiene
+    canónico con mapping de Biwenger no hay con qué contrastar y se cura. Solo una
+    discrepancia real (ambas fechas presentes y distintas) bloquea; ``force`` la salta.
+    """
+    from lfdata.mappings.matcher import birthdate_compatible
+
+    canonical_by_tm = store.canonical_by_source(store.players, TRANSFERMARKT)
+    canonical = canonical_by_tm.get(str(player_id))
+    if not canonical:
+        return True
+    biw_rows = store.players[
+        (store.players["fuente"] == "biwenger") & (store.players["canonical_id"] == canonical)
+    ]
+    if biw_rows.empty:
+        return True
+    biw_birth = _biwenger_birth_date(storage, str(biw_rows.iloc[0]["id_en_fuente"]))
+    tm_birth = "" if profile.birth_date is None else profile.birth_date.isoformat()
+    if birthdate_compatible(biw_birth, tm_birth):
+        return True
+    if force:
+        logger.warning(
+            "transfermarkt spieler %d: fecha %s discrepa de la de Biwenger %s "
+            "(canónico %s); se cura igual por --force",
+            player_id,
+            tm_birth,
+            biw_birth,
+            canonical,
+        )
+        return True
+    logger.warning(
+        "transfermarkt spieler %d: fecha %s discrepa de la de Biwenger %s (canónico %s); "
+        "NO se cura (revisa el mapping o usa --force)",
+        player_id,
+        tm_birth,
+        biw_birth,
+        canonical,
+    )
+    return False
+
+
+def _biwenger_birth_date(storage: Storage, biwenger_id: str) -> str:
+    """Fecha de nacimiento ISO de un jugador de Biwenger; vacía si no la publica.
+
+    Mira la plantilla actual y el histórico: la ficha de quien ya dejó la liga
+    (justo el caso de los alcanzados por id) solo vive en ``_history``.
+    """
+    for table in ("biwenger_players", "biwenger_players_history"):
+        try:
+            df = storage.curated.read_table(table)
+        except (FileNotFoundError, OSError):
+            continue
+        if df.empty or "birth_date" not in df.columns or "id" not in df.columns:
+            continue
+        rows = df[df["id"].astype(str) == str(biwenger_id)]
+        for value in rows["birth_date"].dropna():
+            text = str(value)[:10]
+            if text:
+                return text
+    return ""
 
 
 def ingest_squad_values(
@@ -419,8 +631,19 @@ def _ingest_clubs(
             "injuries_tm": _injuries_frame(injury_records),
         }
         for table, frame in frames.items():
-            where = squad_partition if table == "transfermarkt_players" else partition
-            storage.curated.upsert_table(table, frame, key=_TABLE_KEYS[table], partition=where)
+            if table == "transfermarkt_players":
+                # Pertenencia a plantilla: particionada por (competition, season), un
+                # jugador puede estar en varias temporadas. Upsert normal por partición.
+                storage.curated.upsert_table(
+                    table, frame, key=_TABLE_KEYS[table], partition=squad_partition
+                )
+            else:
+                # Historial de carrera completa: cada jugador vive en exactamente una
+                # partición. Al escribirlo aquí se retira de las demás (bajo-demanda,
+                # otra competición), evitando el duplicado latente (ADR 0013).
+                storage.curated.upsert_unique_partition(
+                    table, frame, key=_TABLE_KEYS[table], partition=partition
+                )
             result.rows[table] += len(frame)
 
     return result, seen_player_ids, squad_failures
