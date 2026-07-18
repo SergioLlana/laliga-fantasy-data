@@ -1462,3 +1462,46 @@ def test_cli_map_fails_on_broken_integrity(storage: Storage, tmp_path: Path, cap
     assert "Integridad" in capsys.readouterr().out
     # --check también falla por integridad, no solo por cobertura.
     assert main(["map", "--check", "--data", data_uri, "--mappings", str(mappings)]) == 1
+
+
+# --- informe de mappings de Transfermarkt colgantes (issue #92) ---------------
+
+
+def test_report_flags_dangling_tm_mappings_without_history(
+    storage: Storage, tmp_path: Path
+) -> None:
+    # Williams se auto-mapea a su tm_id, pero market_values_tm no tiene su historial:
+    # es un mapping colgante, la cola de trabajo de `ingest transfermarkt-player`. Se
+    # reporta leyendo curado (sin red) y no rompe --check —la ausencia de historial
+    # empobrece el baseline, no es un hueco de identidad—.
+    seed(
+        storage,
+        teams=BASIC_TEAMS,
+        players=[{"id": 100, "name": "Williams", "team_id": 1}],
+        tm_players=BASIC_TM,
+    )
+    report = run_map(storage, tmp_path / "mappings")
+
+    assert report.tm_dangling == ["10"]
+    assert "mappings colgantes" in report.render()
+    assert check_mappings(storage, tmp_path / "mappings") == []
+
+
+def test_report_omits_tm_mappings_that_have_history(storage: Storage, tmp_path: Path) -> None:
+    seed(
+        storage,
+        teams=BASIC_TEAMS,
+        players=[{"id": 100, "name": "Williams", "team_id": 1}],
+        tm_players=BASIC_TM,
+    )
+    storage.curated.write_table(
+        "market_values_tm",
+        pd.DataFrame(
+            [{"player_id": 10, "date": "2024-01-01", "value": 1000, "club_name": "Athletic"}]
+        ),
+        partition={"competition": "bajo-demanda"},
+    )
+    report = run_map(storage, tmp_path / "mappings")
+
+    assert report.tm_dangling == []
+    assert "colgantes" not in report.render()

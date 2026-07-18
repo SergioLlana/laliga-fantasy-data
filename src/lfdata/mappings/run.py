@@ -107,6 +107,10 @@ class MapReport:
     sofascore_players_review: int = 0
     sofascore_skipped: int = 0
     sofascore_unresolved: int = 0
+    # tm_id aprobados en players.csv sin ninguna fila en ``market_values_tm``: la
+    # identidad se enlazó (a mano, vía token de Fase 1) pero el historial aún no se
+    # ha curado. Es la cola de trabajo de ``ingest transfermarkt-player``.
+    tm_dangling: list[str] = field(default_factory=list)
     unapplied: list[UnappliedDecision] = field(default_factory=list)
 
     @property
@@ -139,6 +143,12 @@ class MapReport:
                 f"{self.sofascore_players_mapped} jugadores colgados del canónico "
                 f"({revisar}) — "
                 f"{self.sofascore_unresolved} IDs de SofaScore sin resolver"
+            )
+        if self.tm_dangling:
+            lines.append(
+                f"Transfermarkt: {len(self.tm_dangling)} mappings colgantes "
+                "(tm_id aprobado sin historial en market_values_tm) — "
+                "cola de `ingest transfermarkt-player`"
             )
         if self.unapplied:
             lines.append("")
@@ -429,9 +439,21 @@ def run_map(
     )
 
     store.save()
-    report = _report(store, biw_teams, biw_players, so_players_all)
+    report = _report(store, biw_teams, biw_players, so_players_all, _tm_history_ids(storage))
     report.unapplied = unapplied
     return report
+
+
+def _tm_history_ids(storage: Storage) -> set[str]:
+    """IDs de Transfermarkt con historial ya curado (una fila en ``market_values_tm``).
+
+    Lectura de curado, sin red: los ``tm_id`` aprobados que no estén aquí son los
+    mappings colgantes que el informe reporta como cola de ``ingest transfermarkt-player``.
+    """
+    df = _read_curated(storage, "market_values_tm", ["player_id"])
+    return {
+        str(int(v)) if isinstance(v, float) else str(v) for v in df["player_id"].dropna() if str(v)
+    }
 
 
 # --- equipos -----------------------------------------------------------------
@@ -1139,6 +1161,7 @@ def _report(
     biw_teams: pd.DataFrame,
     biw_players: pd.DataFrame,
     so_players_all: pd.DataFrame,
+    tm_history_ids: set[str],
 ) -> MapReport:
     team_ids = {str(int(v)) for v in biw_teams["id"].dropna()}
     player_ids = {str(int(v)) for v in biw_players["id"].dropna()}
@@ -1149,6 +1172,8 @@ def _report(
     so_ids = {str(int(v)) for v in so_players_all["sofascore_player_id"].dropna()}
     so_mapped = store.approved_ids(store.players, SOFASCORE)
     so_present = bool(so_ids) or not store.players[store.players["fuente"] == SOFASCORE].empty
+
+    tm_mapped = store.approved_ids(store.players, TRANSFERMARKT)
 
     return MapReport(
         teams_total=len(team_ids),
@@ -1165,6 +1190,7 @@ def _report(
         sofascore_players_review=store.players_review_sofascore["biwenger_id"].nunique(),
         sofascore_skipped=len(store.sofascore_skips),
         sofascore_unresolved=len(so_ids - so_mapped),
+        tm_dangling=sorted(tm_mapped - tm_history_ids),
     )
 
 

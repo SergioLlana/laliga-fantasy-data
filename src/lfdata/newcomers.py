@@ -59,6 +59,7 @@ from lfdata.sources.sofascore.client import (
     SofaScoreClient,
 )
 from lfdata.sources.transfermarkt import ingest_clubs
+from lfdata.sources.transfermarkt import ingest_player as ingest_tm_player
 from lfdata.storage import Storage
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,12 @@ DEFERRED_IDENTITY = "fichajes aplazados por identidad de SofaScore pendiente"
 
 # Anomalía: la fuente no tiene al jugador, así que no hay historial que curar.
 NO_PROFILE = "fichajes sin ficha en SofaScore"
+
+# Fichajes cuya identidad de Transfermarkt está aprobada (a mano, vía token de
+# Fase 1) pero cuyo tm_id sigue colgante —sin historial en ``market_values_tm``—
+# porque no aparecen en el kader de su club de llegada (filial, lag de TM): se les
+# trae la carrera por id, cerrando la ventana del patrón (issue #92).
+TM_HISTORY = "fichajes con historial de Transfermarkt traído por id"
 
 SOFASCORE = "sofascore"
 
@@ -352,7 +359,79 @@ def _resolve_identity(
 
     store = MappingStore(Path(mappings_dir))
     store.load()
+
+    _download_dangling_tm_history(
+        storage,
+        pending,
+        store,
+        mappings_dir=mappings_dir,
+        transport=transport,
+        result=result,
+    )
     return store
+
+
+def _download_dangling_tm_history(
+    storage: Storage,
+    pending: list[Newcomer],
+    store: MappingStore,
+    *,
+    mappings_dir: str,
+    transport: HttpTransport | None,
+    result: IngestResult,
+) -> None:
+    """Trae por id el historial de los fichajes con TM aprobado pero fuera del kader.
+
+    Simetría con la descarga de SofaScore por id ya verificado
+    (:func:`_download_by_id`): el token de Fase 1 aprueba el mapping de Transfermarkt
+    sin datos, y aquí se cierra la ventana descargando su carrera cuando el fichaje
+    llega de una filial o con lag de Transfermarkt y no está en el kader de su club.
+
+    El fichaje que **sí** estaba en el kader ya tiene historial —lo curó
+    ``ingest_clubs`` en el refresh de identidad—, así que la comprobación de colgante
+    (sin filas en ``market_values_tm``) lo excluye por sí sola. Ningún fallo aborta el
+    run: ``ingest_player`` registra el fallo y se reintenta el run siguiente.
+    """
+    canonical_by_biwenger = MappingStore.canonical_by_source(store.players, BIWENGER)
+    canonical_to_tm = {
+        canonical: tm_id
+        for tm_id, canonical in MappingStore.canonical_by_source(
+            store.players, TRANSFERMARKT
+        ).items()
+    }
+    history_ids = _tm_history_ids(storage)
+
+    for newcomer in pending:
+        canonical = canonical_by_biwenger.get(str(newcomer.player_id))
+        tm_id = canonical_to_tm.get(canonical) if canonical else None
+        if tm_id is None or tm_id in history_ids:
+            continue
+        downloaded = ingest_tm_player(
+            storage, tm_id, mappings_dir=mappings_dir, transport=transport
+        )
+        _add(result, downloaded)
+        if downloaded.failures:
+            continue
+        result.stats[TM_HISTORY] = result.stats.get(TM_HISTORY, 0) + 1
+        logger.info(
+            "fichaje %s (biwenger %d): historial de Transfermarkt (spieler %s) traído por id "
+            "(fuera del kader), %d valores de mercado",
+            newcomer.name,
+            newcomer.player_id,
+            tm_id,
+            downloaded.rows.get("market_values_tm", 0),
+        )
+
+
+def _tm_history_ids(storage: Storage) -> set[str]:
+    """IDs de Transfermarkt con historial ya curado (una fila en ``market_values_tm``)."""
+    try:
+        df = storage.curated.read_table("market_values_tm")
+    except (FileNotFoundError, OSError):
+        return set()
+    if df.empty or "player_id" not in df.columns:
+        return set()
+    return {str(int(v)) for v in df["player_id"].dropna()}
 
 
 def _transfermarkt_clubs(mappings_dir: str, team_ids: Iterable[int | None]) -> set[int]:
