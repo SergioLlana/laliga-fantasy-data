@@ -157,6 +157,51 @@ def test_upsert_with_composite_key_adds_dates_without_replacing_the_player(
     ]
 
 
+def test_upsert_unique_partition_moves_entity_across_partitions(storage: Storage) -> None:
+    """Un jugador vive en exactamente una partición: al reescribirlo se retira de las demás.
+
+    Cubre el ciclo la-liga↔bajo-demanda↔segunda (ADR 0013): un jugador alcanzado
+    por id (bajo-demanda) que después aparece en un kader de La Liga se mueve, sin
+    quedar duplicado al leer la tabla entera; y alcanzarlo luego desde Segunda lo
+    vuelve a mover, no lo duplica.
+    """
+    market = "market_values_tm"
+    # Alcanzado por id: su historial cae en bajo-demanda.
+    storage.curated.upsert_unique_partition(
+        market,
+        pd.DataFrame({"player_id": [7, 7], "value": [1, 2]}),
+        partition={"competition": "bajo-demanda"},
+    )
+    # Otro jugador, presente en La Liga: no debe tocarse cuando llegue el 7.
+    storage.curated.upsert_unique_partition(
+        market,
+        pd.DataFrame({"player_id": [9], "value": [5]}),
+        partition={"competition": "la-liga"},
+    )
+
+    # El 7 aparece ahora en el kader de La Liga: se mueve allí y se retira de bajo-demanda.
+    storage.curated.upsert_unique_partition(
+        market,
+        pd.DataFrame({"player_id": [7], "value": [3]}),
+        partition={"competition": "la-liga"},
+    )
+    read = storage.curated.read_table(market)
+    assert set(read["player_id"]) == {7, 9}
+    assert (read["player_id"] == 7).sum() == 1  # sin duplicado entre particiones
+    assert read.loc[read["player_id"] == 7, "competition"].tolist() == ["la-liga"]
+
+    # Alcanzado ahora desde Segunda: se mueve otra vez, sigue sin duplicarse.
+    storage.curated.upsert_unique_partition(
+        market,
+        pd.DataFrame({"player_id": [7], "value": [4]}),
+        partition={"competition": "segunda-division"},
+    )
+    read = storage.curated.read_table(market)
+    assert (read["player_id"] == 7).sum() == 1
+    assert read.loc[read["player_id"] == 7, "competition"].tolist() == ["segunda-division"]
+    assert read.loc[read["player_id"] == 9, "competition"].tolist() == ["la-liga"]
+
+
 def test_upsert_with_custom_key(storage: Storage) -> None:
     storage.curated.upsert_table("players", pd.DataFrame({"id": [1, 2], "n": ["a", "b"]}), key="id")
     storage.curated.upsert_table("players", pd.DataFrame({"id": [2], "n": ["B"]}), key="id")

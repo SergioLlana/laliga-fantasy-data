@@ -796,6 +796,83 @@ def test_unrecognized_token_preserved_and_reported(storage: Storage, tmp_path: P
     assert _decisions_column(mappings, "10") == "yep"
 
 
+# --- token de spieler_id en la revisión de jugadores de Transfermarkt ---------
+
+
+def _seed_sincandidato(storage: Storage) -> None:
+    seed(
+        storage,
+        teams=BASIC_TEAMS,
+        players=[{"id": 100, "name": "Fantasma", "team_id": 1}],
+        tm_players=BASIC_TM,
+    )
+
+
+def test_spieler_id_token_maps_sincandidato_player(storage: Storage, tmp_path: Path) -> None:
+    mappings = tmp_path / "mappings"
+    _seed_sincandidato(storage)
+    run_map(storage, mappings)  # -> fila sin-candidato, tm_id vacío
+    _edit_review(mappings, [("", "888888")])  # id pegado en la fila sin candidato
+
+    report = run_map(storage, mappings)
+
+    assert report.players_manual == 1
+    store = MappingStore(mappings)
+    store.load()
+    rows = store.players[store.players["id_en_fuente"] == "100"]
+    assert rows["fuente"].tolist() == ["biwenger"]  # su canónico
+    canonical = rows.iloc[0]["canonical_id"]
+    tm = store.players[
+        (store.players["canonical_id"] == canonical) & (store.players["fuente"] == "transfermarkt")
+    ]
+    assert tm["id_en_fuente"].tolist() == ["888888"]
+
+
+def test_profile_url_token_maps_sincandidato_player(storage: Storage, tmp_path: Path) -> None:
+    mappings = tmp_path / "mappings"
+    _seed_sincandidato(storage)
+    run_map(storage, mappings)
+    url = "https://www.transfermarkt.com/x/profil/spieler/777123"
+    _edit_review(mappings, [("", url)])
+
+    report = run_map(storage, mappings)
+
+    assert report.players_manual == 1
+    store = MappingStore(mappings)
+    store.load()
+    assert "777123" in set(store.players["id_en_fuente"])
+
+
+def test_spieler_id_in_row_with_candidate_reported(storage: Storage, tmp_path: Path) -> None:
+    mappings = tmp_path / "mappings"
+    _seed_ambiguous(storage)
+    run_map(storage, mappings)
+    _edit_review(mappings, [("10", "888888")])  # id en una fila que ya trae candidato
+
+    report = run_map(storage, mappings)
+
+    assert report.players_manual == 0
+    assert [u.motivo for u in report.unapplied] == ["id-en-fila-con-candidato"]
+    assert _decisions_column(mappings, "10") == "888888"  # el trabajo manual no se borra
+
+
+def test_spieler_id_token_not_recognized_for_teams(storage: Storage, tmp_path: Path) -> None:
+    """El token de id solo vale en jugadores de Transfermarkt; en equipos, no."""
+    mappings = tmp_path / "mappings"
+    seed(storage, teams=[{"id": 5, "name": "Desconocido"}], players=[], tm_players=BASIC_TM)
+    run_map(storage, mappings)  # -> equipo sin-candidato
+
+    review = pd.read_csv(mappings / "teams-review.csv", dtype=str, keep_default_na=False)
+    review["decision"] = "888888"  # un id numérico, no un sinónimo de y/skip
+    review.to_csv(mappings / "teams-review.csv", index=False)
+
+    report = run_map(storage, mappings)
+    assert {u.motivo for u in report.unapplied} == {"token-no-reconocido"}
+    store = MappingStore(mappings)
+    store.load()
+    assert "888888" not in set(store.teams["id_en_fuente"])
+
+
 def test_manual_decision_rejects_taken_tm_id(storage: Storage, tmp_path: Path) -> None:
     mappings = tmp_path / "mappings"
     seed(

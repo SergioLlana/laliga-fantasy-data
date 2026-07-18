@@ -359,6 +359,45 @@ class CuratedStore:
             combined = incoming
         return self.write_table(table, combined, partition=partition)
 
+    def upsert_unique_partition(
+        self,
+        table: str,
+        df: pd.DataFrame,
+        *,
+        key: str = "player_id",
+        partition: Mapping[str, str] | None = None,
+    ) -> str:
+        """Upsert en ``partition`` que garantiza que cada entidad vive en una sola partición.
+
+        Además del upsert por ``key`` dentro de ``partition`` (como
+        :meth:`upsert_table`), retira las filas de las mismas entidades de **las
+        demás particiones** de la tabla: así una entidad alcanzada por varias
+        procedencias de crawl no queda duplicada (ADR 0013). Es lo que hace inocuo
+        leer la tabla entera con :meth:`read_table`, que une todas las particiones.
+
+        Sirve a las cuatro tablas de historial de Transfermarkt (``market_values_tm``,
+        ``transfers``, ``availability_tm``, ``injuries_tm``), cuya partición por
+        ``competition`` es procedencia del crawl y no ámbito del dato: el histórico de
+        un jugador es el mismo se le alcance desde la liga que se le alcance, así que
+        moverlo de partición no pierde nada.
+        """
+        target_key = self._table_key(table, partition)
+        incoming_keys = set(df[key])
+        prefix = f"curated/{table}/"
+        suffix = "/data.parquet"
+        for object_key in self._backend.list_keys(prefix):
+            if not object_key.endswith(suffix) or object_key == target_key:
+                continue
+            sibling = pd.read_parquet(io.BytesIO(self._backend.read_bytes(object_key)))
+            if key not in sibling.columns:
+                continue
+            kept = sibling[~sibling[key].isin(incoming_keys)]
+            if len(kept) != len(sibling):
+                buffer = io.BytesIO()
+                kept.to_parquet(buffer, index=False)
+                self._backend.write_bytes(object_key, buffer.getvalue())
+        return self.upsert_table(table, df, key=key, partition=partition)
+
     def retain_keys(
         self,
         table: str,

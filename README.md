@@ -31,6 +31,13 @@ uv run lfdata ingest transfermarkt --competition segunda-division --max-clubs 2
 # pero lo cura igual desde raw/: reconstruye la tabla sin re-scrapear
 uv run lfdata ingest transfermarkt --competition la-liga --season 2026 --since-days 30
 
+# Historial de un jugador fuera de plantilla (los sin-candidato enlazados a mano, o
+# un fichaje de Segunda/extranjero que aún no sale en ningún kader): cura solo sus
+# cuatro tablas de historial (valores, traspasos, disponibilidad, lesiones), nunca
+# transfermarkt_players (ADR 0013). Por spieler_id, URL de perfil o canonical_id
+uv run lfdata ingest transfermarkt-player --player 709380
+uv run lfdata ingest transfermarkt-player --player p00042 --cached   # re-cura desde raw/
+
 # Valor total de plantilla por club (una petición por liga-temporada) de las 7 ligas
 # (La Liga, Segunda, Premier, Serie A, Bundesliga, Ligue 1 y Primeira): el nivel de
 # equipo del modelo y, promediando por liga, el nivel de liga del baseline de fichajes.

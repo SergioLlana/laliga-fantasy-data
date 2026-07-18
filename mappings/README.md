@@ -67,6 +67,20 @@ mappings nuevos, `lfdata curate sofascore-canonical` rellena el `canonical_id` d
 `player_match_stats`/`player_season_stats` cruzándolas con los mappings (sin releer
 raw/).
 
+## Jugadores fuera de plantilla
+
+Un jugador de Biwenger enlazado a mano a su `spieler_id` (o un fichaje que aún no
+sale en ningún kader descargado) tiene **identidad** en Transfermarkt pero no
+**historial** curado: la ingesta por competición solo recorre plantillas. Su
+historial (valor de mercado, traspasos, disponibilidad, lesiones) se trae con
+`lfdata ingest transfermarkt-player --player <spieler_id|url|canonical_id>`, que
+cura las cuatro tablas de historial —de carrera completa— y **nunca**
+`transfermarkt_players`. Cae en la partición centinela `competition=bajo-demanda`
+hasta que el jugador aparezca en un kader de La Liga, y una red de seguridad
+contrasta la fecha de nacimiento del perfil con la de Biwenger antes de curar
+(`--force` la salta). El porqué de todo esto, en
+[ADR 0013](../docs/adr/0013-historial-transfermarkt-carrera-completa-particion-por-procedencia.md).
+
 ## Flujo
 
 1. `lfdata map` regenera candidatos: aprueba los seguros (`auto`) y deja los
@@ -87,6 +101,11 @@ raw/).
    - `y` en la fila del candidato correcto de Transfermarkt.
    - `skip` si el jugador no tiene contraparte en Transfermarkt (se le da ID
      canónico solo con Biwenger).
+   - Un **`spieler_id`** (o una URL `.../profil/spieler/NNN`) en la fila de un
+     jugador `sin-candidato`: lo mapea a ese `tm_id` aunque no hubiera candidato
+     que ofrecer (Segunda/filiales y extranjeros que no salen en ninguna plantilla
+     descargada). Solo en la revisión de **jugadores de Transfermarkt**; pegarlo en
+     una fila que ya trae candidato es ambiguo (`id-en-fila-con-candidato`).
    - En blanco = sigue pendiente.
 3. `lfdata map` de nuevo: promueve las decisiones a `players.csv`/`teams.csv`
    (como `manual`) y vuelve a proponer solo lo que siga sin resolver. Es
@@ -105,7 +124,10 @@ vez de reescribirla) y se lista en el informe con su motivo:
 - `varios-y` — más de un `y` en el mismo jugador/equipo.
 - `y-sin-candidato` — `y` en una fila sin candidato de Transfermarkt.
 - `y-con-skip` — `y` y `skip` mezclados.
-- `token-no-reconocido` — la `decision` no es `y`, `skip` ni un sinónimo válido.
+- `token-no-reconocido` — la `decision` no es `y`, `skip` ni un sinónimo válido
+  (ni un `spieler_id`/URL en la revisión de jugadores de Transfermarkt).
+- `id-en-fila-con-candidato` — pegaste un `spieler_id` en una fila que ya trae
+  candidato; usa `y` para ese candidato, o pega el id en la fila `sin-candidato`.
 - `tm-id-ya-tomado` — el candidato elegido ya está mapeado a otra identidad
   canónica.
 
