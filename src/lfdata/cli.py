@@ -625,23 +625,72 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mapper.set_defaults(func=_cmd_map)
 
+    run_cmd = subparsers.add_parser(
+        "run",
+        help=(
+            "Orquestador reanudable: encadena los pasos del runbook en orden "
+            "(issue #99); los comandos sueltos siguen valiendo como fallback"
+        ),
+    )
+    run_targets = run_cmd.add_subparsers(dest="target", title="pipelines", required=True)
+
+    run_backfill = run_targets.add_parser(
+        "backfill",
+        help="Backfill completo de una temporada de La Liga (runbook, pasos 1-10)",
+    )
+    run_backfill.add_argument(
+        "--season",
+        type=int,
+        required=True,
+        help="Año de inicio de la temporada a backfillear (2025 = 2025/26)",
+    )
+    run_backfill.add_argument(
+        "--data",
+        default=os.environ.get("LFDATA_DATA", DEFAULT_DATA_URI),
+        help=f"URI base del almacenamiento (por defecto {DEFAULT_DATA_URI} o $LFDATA_DATA)",
+    )
+    run_backfill.add_argument(
+        "--mappings",
+        default=DEFAULT_MAPPINGS_DIR,
+        help=f"Directorio de los ficheros de mappings (por defecto {DEFAULT_MAPPINGS_DIR}/)",
+    )
+    run_backfill.set_defaults(func=_cmd_run_backfill)
+
+    run_incremental = run_targets.add_parser(
+        "incremental",
+        help="Actualización de la temporada en curso: ciclo tras-jornada o semanal",
+    )
+    run_incremental.add_argument(
+        "--season",
+        type=int,
+        required=True,
+        help="Año de inicio de la temporada en curso (2025 = 2025/26)",
+    )
+    run_incremental.add_argument(
+        "--cycle",
+        required=True,
+        choices=("jornada", "semanal"),
+        help="Ciclo del runbook a ejecutar",
+    )
+    run_incremental.add_argument(
+        "--data",
+        default=os.environ.get("LFDATA_DATA", DEFAULT_DATA_URI),
+        help=f"URI base del almacenamiento (por defecto {DEFAULT_DATA_URI} o $LFDATA_DATA)",
+    )
+    run_incremental.add_argument(
+        "--mappings",
+        default=DEFAULT_MAPPINGS_DIR,
+        help=f"Directorio de los ficheros de mappings (por defecto {DEFAULT_MAPPINGS_DIR}/)",
+    )
+    run_incremental.set_defaults(func=_cmd_run_incremental)
+
     return parser
 
 
 def _report_ingest(result, competition: str, data: str) -> int:
     """Imprime filas por tabla, métricas, anomalías y fallos; 1 si hubo alguno."""
-    for table, count in result.rows.items():
-        print(f"{table}: {count} filas ({competition}) -> {data}")
-    for name, count in result.stats.items():
-        print(f"{name}: {count}")
-    for reason, count in result.anomalies.items():
-        print(f"anomalía: {count} {reason}")
-    if not result.failures:
-        return 0
-    print(f"\n{len(result.failures)} jugadores fallaron y se saltaron:")
-    for failure in result.failures:
-        print(f"  - {failure}")
-    return 1
+    print(result.render(competition, data=data))
+    return 1 if result.failures else 0
 
 
 def _cmd_ingest_biwenger(args: argparse.Namespace) -> int:
@@ -921,6 +970,29 @@ def _cmd_map(args: argparse.Namespace) -> int:
         for problem in error.problems:
             print(f"  - {problem}")
         return 1
+
+
+def _cmd_run_backfill(args: argparse.Namespace) -> int:
+    from lfdata.orchestrator import backfill_steps, run_steps
+    from lfdata.storage import Storage
+
+    storage = Storage(args.data)
+    steps = backfill_steps(storage, args.season, mappings_dir=args.mappings)
+    report = run_steps(f"backfill-la-liga-{args.season}", steps)
+    print(report.render())
+    return 0 if report.ok else 1
+
+
+def _cmd_run_incremental(args: argparse.Namespace) -> int:
+    from lfdata.orchestrator import jornada_steps, run_steps, semanal_steps
+    from lfdata.storage import Storage
+
+    storage = Storage(args.data)
+    builder = jornada_steps if args.cycle == "jornada" else semanal_steps
+    steps = builder(storage, args.season, mappings_dir=args.mappings)
+    report = run_steps(f"incremental-{args.cycle}-la-liga-{args.season}", steps)
+    print(report.render())
+    return 0 if report.ok else 1
 
 
 def main(argv: list[str] | None = None) -> int:
