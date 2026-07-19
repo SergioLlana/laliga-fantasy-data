@@ -22,6 +22,11 @@ uv run lfdata --help
 # con Transfermarkt/SofaScore como ligas de origen)
 uv run lfdata ingest biwenger --competition la-liga
 
+# Snapshot diario del precio de toda la plantilla (1 petición, upsert por
+# player_id+fecha). El Precio es una señal de la plantilla entera, así que va
+# aparte del delta de jornada (ADR 0012), que solo cura fantasy_points
+uv run lfdata ingest biwenger-prices --competition la-liga
+
 # Ingesta de Transfermarkt: plantillas por club, perfiles, valores y traspasos
 # (espera 4 s entre peticiones; --max-clubs limita el recorrido para una prueba)
 uv run lfdata ingest transfermarkt --competition la-liga

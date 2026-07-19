@@ -13,6 +13,7 @@ from lfdata.sources.biwenger import (
     BiwengerClient,
     RoundDiscoveryError,
     SourceFormatError,
+    ingest_prices_snapshot,
     ingest_reports,
     ingest_reports_delta,
     ingest_rounds,
@@ -44,6 +45,7 @@ def _competition_payload(
     rounds: list[tuple[int, str]] | None = None,
     postponed_round_ids: tuple[int, ...] = (),
     coaches: list[str] | None = None,
+    prices: dict[str, int] | None = None,
 ) -> bytes:
     """Plantilla mínima con los jugadores dados (solo lo que exige el modelo).
 
@@ -51,8 +53,10 @@ def _competition_payload(
     refresh por deltas usa para detectar la jornada recién terminada; las que estén
     en ``postponed_round_ids`` se nombran con el sufijo "(postponed)" que Biwenger
     da a las jornadas aplazadas. ``coaches`` añade entrenadores, que Biwenger
-    publica en la misma lista que los jugadores.
+    publica en la misma lista que los jugadores. ``prices`` fija el precio de un
+    slug concreto (por defecto 100000), para el snapshot diario de precios.
     """
+    prices = prices or {}
     players = {
         str(i): {
             "id": i,
@@ -60,7 +64,7 @@ def _competition_payload(
             "slug": slug,
             "position": 4,
             "status": "ok",
-            "price": 100000,
+            "price": prices.get(slug, 100000),
             "priceIncrement": 0,
         }
         for i, slug in enumerate(slugs, start=1)
@@ -1389,3 +1393,80 @@ def test_cli_biwenger_delta_requires_season(tmp_path: Path, capsys) -> None:
     )
     assert exit_code == 2
     assert "--delta requiere --season" in capsys.readouterr().out
+
+
+def test_delta_does_not_curate_prices(storage: Storage) -> None:
+    """El precio es una señal de la plantilla entera: --delta ya no lo cura (ADR 0012)."""
+    comp = _competition_payload("scorer", "bench", rounds=[(4484, "finished")])
+    round_payload = _round_payload(4484, 1, catalogue_ids=(4484,))
+    details = {"scorer": _detail_scoring_round(1, "scorer", 4484, 46124)}
+
+    result = ingest_reports_delta(
+        storage, "la-liga", "2026", transport=DeltaTransport(comp, details, round_payload)
+    )
+
+    assert result.rows == {"fantasy_points": 1, "biwenger_prices": 0}
+    with pytest.raises(FileNotFoundError):  # ni siquiera una partición vacía
+        storage.curated.read_table("biwenger_prices")
+
+
+# --- Snapshot diario de precios (#102, ADR 0012) -----------------------------
+
+
+def test_price_snapshot_writes_todays_price_for_whole_squad(storage: Storage) -> None:
+    payload = _competition_payload("scorer", "bench", prices={"scorer": 150000, "bench": 90000})
+    transport = FakeTransport(payload)
+
+    result = ingest_prices_snapshot(storage, "la-liga", transport=transport)
+
+    assert result.rows == {"biwenger_prices": 2}
+    assert len(transport.urls) == 1  # 1 sola petición para toda la plantilla
+    assert transport.urls[0].endswith("/competitions/la-liga/data")
+    prices = storage.curated.read_table("biwenger_prices").sort_values("player_id")
+    assert prices["date"].tolist() == [date.today(), date.today()]
+    assert prices["price"].tolist() == [150000, 90000]
+
+
+def test_price_snapshot_excludes_coaches(storage: Storage) -> None:
+    payload = _competition_payload("scorer", coaches=["flick"])
+    result = ingest_prices_snapshot(storage, "la-liga", transport=FakeTransport(payload))
+
+    assert result.rows == {"biwenger_prices": 1}
+
+
+def test_price_snapshot_is_idempotent_by_player_and_date(storage: Storage) -> None:
+    payload = _competition_payload("scorer", "bench", prices={"scorer": 150000, "bench": 90000})
+
+    ingest_prices_snapshot(storage, "la-liga", transport=FakeTransport(payload))
+    updated = _competition_payload("scorer", "bench", prices={"scorer": 160000, "bench": 90000})
+    ingest_prices_snapshot(storage, "la-liga", transport=FakeTransport(updated))
+
+    prices = storage.curated.read_table("biwenger_prices")
+    assert len(prices) == 2  # el segundo run pisa el precio de hoy, no lo duplica
+    scorer_row = prices[prices["player_id"].astype(int) == 1].iloc[0]
+    assert scorer_row["price"] == 160000
+
+
+def test_price_snapshot_season_derived_from_todays_date(storage: Storage) -> None:
+    payload = _competition_payload("scorer", prices={"scorer": 150000})
+    ingest_prices_snapshot(storage, "la-liga", transport=FakeTransport(payload))
+
+    prices = storage.curated.read_table("biwenger_prices")
+    expected_season = date.today().year if date.today().month >= 7 else date.today().year - 1
+    assert prices["season"].astype(str).unique().tolist() == [str(expected_season)]
+
+
+def test_price_snapshot_metric_matches_player_detail_price(storage: Storage) -> None:
+    """Mismo valor que curaría el detalle por jugador (verificado en el ADR 0012)."""
+    detail = (
+        BiwengerClient(FakeTransport(PLAYER_LA_LIGA.read_bytes()), storage.raw)
+        .fetch_player_reports("la-liga", "alex-fores", "2026")
+        .data
+    )
+    latest_detail_price = detail.prices[-1][1]
+
+    payload = _competition_payload("alex-fores", prices={"alex-fores": latest_detail_price})
+    ingest_prices_snapshot(storage, "la-liga", transport=FakeTransport(payload))
+
+    prices = storage.curated.read_table("biwenger_prices")
+    assert prices["price"].iloc[0] == latest_detail_price

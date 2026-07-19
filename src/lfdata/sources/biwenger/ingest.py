@@ -243,19 +243,26 @@ def _refresh_players(
     players: list[Player],
     *,
     batch_size: int,
+    curate_prices: bool = True,
 ) -> IngestResult:
     """Descarga el detalle de ``players`` y vuelca fantasy_points/prices/birthday.
 
     El núcleo compartido por el recorrido completo (:func:`ingest_reports`) y el
     refresh por deltas (:func:`ingest_reports_delta`): la única diferencia entre
-    ambos es qué jugadores llegan aquí. Vuelca por lotes con ``upsert_table``
-    (clave ``player_id``) durante el recorrido, de modo que un fallo a mitad
-    conserva en curated todo lo ya descargado y reejecutar no duplica. Un jugador
-    que la fuente ya no sirve (404) se registra como fallo y se salta sin abortar.
+    ambos es qué jugadores llegan aquí (y, para el delta, que ya no cura precio).
+    Vuelca por lotes con ``upsert_table`` (clave ``player_id``) durante el
+    recorrido, de modo que un fallo a mitad conserva en curated todo lo ya
+    descargado y reejecutar no duplica. Un jugador que la fuente ya no sirve
+    (404) se registra como fallo y se salta sin abortar.
 
     El detalle trae la fecha de nacimiento (``birthday``), que la plantilla no
     publica: se refresca en ``biwenger_players`` (upsert por ``id``, misma
     partición de competición) para endurecer el matching de identidad (#37).
+
+    ``curate_prices`` controla si se cura ``biwenger_prices`` desde este detalle.
+    El precio es una señal de la plantilla entera, no solo de quien puntuó en la
+    jornada: el refresh por deltas lo desactiva (ADR 0012) y deja el mantenimiento
+    de precios al snapshot diario de plantilla (:func:`ingest_prices_snapshot`).
     """
     partition = {"competition": competition, "season": season}
     result = IngestResult(rows={"fantasy_points": 0, "biwenger_prices": 0})
@@ -308,7 +315,8 @@ def _refresh_players(
             )
             continue
         batch_points.extend(_points_rows(detail))
-        batch_prices.extend(_price_rows(detail, season))
+        if curate_prices:
+            batch_prices.extend(_price_rows(detail, season))
         batch_players.append(player)
         births[player.id] = _birthday_to_iso(detail.birthday)
         incomplete = _points_without_stats(detail)
@@ -457,10 +465,16 @@ def ingest_reports_delta(
     que si no se verían como jornada nueva en cada run porque ``fantasy_points``
     solo guarda el ``round_id`` original— y, por cada una, pide la jornada vía
     rounds (1 petición) para obtener la lista exacta de quienes puntuaron (~280).
-    Solo esos jugadores de la plantilla refrescan su detalle (reports, precios,
+    Solo esos jugadores de la plantilla refrescan su detalle (reports y
     birthday). Como una jornada solo genera fila en ``fantasy_points`` para quien
     puntuó, el resultado es idéntico al del recorrido completo, con una fracción
     de las peticiones.
+
+    No cura ``biwenger_prices`` (ADR 0012): el precio es una señal de la
+    plantilla entera, y estrangularlo con quien puntuó dejaría sin precio a
+    lesionados, suplentes y demás no-puntuadores. Ese mantenimiento lo hace
+    :func:`ingest_prices_snapshot` (diario) con el barrido completo de
+    :func:`ingest_reports` como red de seguridad periódica.
 
     Sin jornada nueva desde el último run, no pide ningún detalle. Idempotente:
     ``fantasy_points`` es la marca de qué jornadas ya se procesaron, así que
@@ -518,7 +532,13 @@ def ingest_reports_delta(
     )
 
     result = _refresh_players(
-        client, storage, competition, season, to_refresh, batch_size=batch_size
+        client,
+        storage,
+        competition,
+        season,
+        to_refresh,
+        batch_size=batch_size,
+        curate_prices=False,
     )
     result.stats = {REFRESHED: len(to_refresh), SKIPPED: len(squad) - len(to_refresh)}
     logger.info(
@@ -531,6 +551,56 @@ def ingest_reports_delta(
         len(result.failures),
     )
     return result
+
+
+def ingest_prices_snapshot(
+    storage: Storage,
+    competition: str,
+    *,
+    transport: HttpTransport | None = None,
+) -> IngestResult:
+    """Snapshot diario de precios: 1 petición, precio de hoy de toda la plantilla.
+
+    Desacopla ``biwenger_prices`` de ``--delta`` (ADR 0012): ``Player.price`` de
+    la plantilla (``fetch_competition_data``) es exactamente la misma métrica
+    que la serie ``PlayerDetail.prices`` del detalle por jugador (verificado
+    empíricamente, ver el ADR), así que basta una petición para refrescar el
+    precio de todos, hayan puntuado o no. Upsert por ``(player_id, date)``:
+    reejecutar el mismo día no duplica. La temporada se deriva de la fecha de
+    hoy (corte 1 de julio, :func:`_season_of_price`), no se recibe como
+    argumento.
+
+    Solo captura el precio del día en que corre: si un día no se ejecuta, el
+    hueco lo rellena el barrido completo de :func:`ingest_reports` como red de
+    seguridad periódica (dentro de la ventana móvil de ~366 días que sirve la
+    fuente).
+    """
+    transport = transport or HttpTransport(
+        wait_seconds=WAIT_SECONDS,
+        overflow_proxy=scrapeops_proxy_from_env(enabled=PROXY_OVERFLOW),
+    )
+    client = BiwengerClient(transport, storage.raw)
+    data = client.fetch_competition_data(competition).data
+
+    today = datetime.now(tz=UTC).date()
+    season = _season_of_price(today)
+    rows = [
+        {"player_id": player.id, "date": today, "price": player.price}
+        for player in squad_players(data)
+    ]
+
+    partition = {"competition": competition, "season": season}
+    storage.curated.upsert_table(
+        "biwenger_prices", _prices_frame(rows), key=("player_id", "date"), partition=partition
+    )
+    logger.info(
+        "biwenger snapshot de precios %s %s: %d jugadores, fecha %s",
+        competition,
+        season,
+        len(rows),
+        today,
+    )
+    return IngestResult(rows={"biwenger_prices": len(rows)})
 
 
 # --- Rounds: puntos por jornada de todos los jugadores, sin sesgo (#51) ------

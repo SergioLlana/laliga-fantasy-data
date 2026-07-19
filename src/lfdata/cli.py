@@ -40,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--season",
         help=(
             "Año de inicio de la temporada (2025 = 2025/26), como en las demás fuentes. "
-            "Si se indica, añade fantasy_points y biwenger_prices"
+            "Si se indica, añade fantasy_points (y biwenger_prices, salvo con --delta)"
         ),
     )
     biwenger.add_argument(
@@ -48,7 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Refresh por deltas tras jornada: en vez de recorrer la plantilla entera, "
-            "refresca solo a quienes puntuaron en las jornadas nuevas (requiere --season)"
+            "refresca solo a quienes puntuaron en las jornadas nuevas (requiere --season). "
+            "No cura biwenger_prices (ADR 0012): usa 'ingest biwenger-prices' para el precio"
         ),
     )
     biwenger.add_argument(
@@ -101,6 +102,23 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"URI base del almacenamiento (por defecto {DEFAULT_DATA_URI} o $LFDATA_DATA)",
     )
     rounds.set_defaults(func=_cmd_ingest_biwenger_rounds)
+
+    prices = ingest_sources.add_parser(
+        "biwenger-prices",
+        help="Snapshot diario del precio de toda la plantilla (ADR 0012)",
+    )
+    prices.add_argument(
+        "--competition",
+        required=True,
+        choices=("la-liga",),
+        help="Competición a ingerir (de Biwenger solo se ingiere la-liga, ADR 0008)",
+    )
+    prices.add_argument(
+        "--data",
+        default=os.environ.get("LFDATA_DATA", DEFAULT_DATA_URI),
+        help=f"URI base del almacenamiento (por defecto {DEFAULT_DATA_URI} o $LFDATA_DATA)",
+    )
+    prices.set_defaults(func=_cmd_ingest_biwenger_prices)
 
     transfermarkt = ingest_sources.add_parser(
         "transfermarkt", help="Plantillas, valores de mercado y traspasos por competición"
@@ -659,6 +677,15 @@ def _cmd_ingest_biwenger_rounds(args: argparse.Namespace) -> int:
 
     storage = Storage(args.data)
     result = ingest_rounds(storage, args.competition, args.season, resume=args.resume)
+    return _report_ingest(result, args.competition, args.data)
+
+
+def _cmd_ingest_biwenger_prices(args: argparse.Namespace) -> int:
+    from lfdata.sources.biwenger import ingest_prices_snapshot
+    from lfdata.storage import Storage
+
+    storage = Storage(args.data)
+    result = ingest_prices_snapshot(storage, args.competition)
     return _report_ingest(result, args.competition, args.data)
 
 
