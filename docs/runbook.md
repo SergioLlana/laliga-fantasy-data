@@ -108,7 +108,8 @@ comando es el que además re-cura, cumpliendo la convención de [ADR 0003](adr/0
 ```bash
 uv run lfdata ingest biwenger --competition la-liga --season 2026 --delta
 #    --delta         refresca solo a quienes puntuaron en las jornadas nuevas,
-#                    en vez de recorrer la plantilla entera
+#                    en vez de recorrer la plantilla entera. Solo fantasy_points:
+#                    ya no cura biwenger_prices (ADR 0012), ver "Diario"
 uv run lfdata ingest biwenger-rounds --competition la-liga --season 2026 --resume
 uv run lfdata backfill sofascore --competition la-liga --season 2026
 uv run lfdata curate sofascore-catalog   # refresca el catálogo con las alineaciones nuevas
@@ -117,6 +118,33 @@ uv run lfdata backfill sofascore-cups --competition copa-del-rey --season 2026
 uv run lfdata backfill sofascore-cups --competition champions-league --season 2026
 uv run lfdata backfill sofascore-cups --competition europa-league --season 2026
 uv run lfdata backfill sofascore-cups --competition conference-league --season 2026
+```
+
+### Diario
+
+El Precio es una señal de la plantilla entera, no solo de quien puntuó, así que se
+mantiene aparte del delta de jornada ([ADR 0012](adr/0012-el-precio-no-va-por-el-delta.md)):
+
+```bash
+uv run lfdata ingest biwenger-prices --competition la-liga
+#    1 petición: añade el precio de hoy de toda la plantilla a biwenger_prices
+#    (upsert por player_id+fecha, temporada derivada de la fecha)
+```
+
+Será un paso del pipeline diario ([#24](https://github.com/SergioLlana/laliga-fantasy-data/issues/24))
+en cuanto exista; hasta entonces se lanza a mano cada día.
+
+### Periódico (red de seguridad de precios, p. ej. mensual)
+
+El snapshot diario solo captura el precio del día en que corre: si algún día no se
+lanza, el barrido completo del detalle por jugador rellena el hueco (dentro de la
+ventana móvil de ~366 días que sirve la fuente), reutilizando el mismo comando del
+backfill, sin `--delta` ([ADR 0012](adr/0012-el-precio-no-va-por-el-delta.md)):
+
+```bash
+uv run lfdata ingest biwenger --competition la-liga --season 2026
+#    barrido completo (~634 peticiones, varias ventanas de cuota): red de
+#    seguridad, no la vía principal de mantenimiento del precio
 ```
 
 ### Semanal

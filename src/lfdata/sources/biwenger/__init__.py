@@ -3,6 +3,7 @@
 from lfdata.sources.biwenger.client import COMPETITIONS, BiwengerClient, SourceFormatError
 from lfdata.sources.biwenger.ingest import (
     RoundDiscoveryError,
+    ingest_prices_snapshot,
     ingest_reports,
     ingest_reports_delta,
     ingest_rounds,
@@ -22,6 +23,7 @@ __all__ = [
     "RoundDiscoveryError",
     "SourceFormatError",
     "default_out_path",
+    "ingest_prices_snapshot",
     "ingest_reports",
     "ingest_reports_delta",
     "ingest_rounds",
