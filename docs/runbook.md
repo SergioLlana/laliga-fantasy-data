@@ -1,9 +1,8 @@
 # Runbook: backfill e incremental
 
-Cómo completar la base de datos y mantenerla al día. Los comandos se lanzan a mano
-(el pipeline programado es el paso 7 de [plan.md](plan.md)); todos son idempotentes
-y reanudables, así que repetir uno nunca rompe nada. Aquí solo aparecen los flags
-operativos; el resto, en `lfdata <comando> --help`.
+Cómo completar la base de datos y mantenerla al día. Todos los comandos son
+idempotentes y reanudables, así que repetir uno nunca rompe nada. Aquí solo
+aparecen los flags operativos; el resto, en `lfdata <comando> --help`.
 
 ## Preparación
 
@@ -13,6 +12,33 @@ export LFDATA_DATA=s3://lfdata-data-593760774245
 ```
 
 Sin esto los comandos escriben en `./data` local, que está incompleto.
+
+## Orquestador (vía principal)
+
+`lfdata run` encadena en orden los pasos de este runbook (issue #99) — la vía
+principal para lanzar un backfill o un ciclo de incremental. Es la lógica que la
+tarea Fargate del pipeline programado ([#24](https://github.com/SergioLlana/laliga-fantasy-data/issues/24))
+invocará; hasta que exista, se lanza a mano o desde cron.
+
+```bash
+uv run lfdata run backfill --season N          # los diez pasos de la sección siguiente
+uv run lfdata run incremental --season 2026 --cycle jornada   # bloque "tras cada jornada"
+uv run lfdata run incremental --season 2026 --cycle semanal   # bloque "semanal"
+```
+
+Cada sub-paso ya es idempotente y reanudable por separado (`--resume`,
+`--since-days`, skip de partidos ya en `raw/`): el orquestador no lleva checkpoint
+propio, solo se **detiene limpio en el primer paso con fallos** (429/404 saltados,
+un partido que no bajó) y deja un resumen de qué se completó y qué quedó
+pendiente, con código de salida `!= 0`. Los pasos siguientes no se ejecutan porque
+suelen depender del anterior (`map` necesita las plantillas ya curadas). Relanzar
+el mismo comando retoma sin re-descargar lo ya bajado ni duplicar en curated,
+apoyado en la reanudabilidad de cada sub-paso — típicamente tras esperar a que se
+reponga la cuota de Biwenger (~30 min, ver más abajo).
+
+Las secciones siguientes describen esos mismos pasos como comandos sueltos: sirven
+de **fallback** para lanzar uno a mano (una prueba parcial con `--max-clubs`, un
+paso que quieres repetir en aislado) y son la referencia de qué hace cada uno.
 
 ## Backfill (temporadas 2021–2025)
 
@@ -24,7 +50,8 @@ cuando llega un fichaje (ver las secciones finales); Segunda admite además un b
 Biwenger y Transfermarkt de N ya curadas, y el matching de SofaScore necesita a su
 vez el eventing de N ya descargado (de sus alineaciones sale el catálogo de identidad).
 
-Para cada temporada `N` de 2021 a 2025, en este orden:
+Equivale a `lfdata run backfill --season N` (fallback suelto). Para cada
+temporada `N` de 2021 a 2025, en este orden:
 
 ```bash
 # 1. Plantilla + reports de Biwenger (puntos, precios, minutos por jugador)
@@ -106,6 +133,8 @@ comando es el que además re-cura, cumpliendo la convención de [ADR 0003](adr/0
 
 ### Tras cada jornada
 
+Equivale a `lfdata run incremental --season 2026 --cycle jornada` (fallback suelto):
+
 ```bash
 uv run lfdata ingest biwenger --competition la-liga --season 2026 --delta
 #    --delta         refresca solo a quienes puntuaron en las jornadas nuevas,
@@ -149,6 +178,8 @@ uv run lfdata ingest biwenger --competition la-liga --season 2026
 ```
 
 ### Semanal
+
+Equivale a `lfdata run incremental --season 2026 --cycle semanal` (fallback suelto):
 
 ```bash
 uv run lfdata ingest transfermarkt --competition la-liga --season 2026 --since-days 7

@@ -43,6 +43,26 @@ class IngestResult:
     anomalies: dict[str, int] = field(default_factory=dict)
     stats: dict[str, int] = field(default_factory=dict)
 
+    def render(self, label: str, *, data: str | None = None) -> str:
+        """Texto multi-línea con filas por tabla, métricas, anomalías y fallos.
+
+        Común al resumen del CLI (:func:`lfdata.cli._report_ingest`) y al del
+        orquestador (:mod:`lfdata.orchestrator`), para que ambos impriman el mismo
+        formato sin duplicar la lógica.
+        """
+        lines = []
+        suffix = f" -> {data}" if data else ""
+        for table, count in self.rows.items():
+            lines.append(f"{table}: {count} filas ({label}){suffix}")
+        for name, count in self.stats.items():
+            lines.append(f"{name}: {count}")
+        for reason, count in self.anomalies.items():
+            lines.append(f"anomalía: {count} {reason}")
+        if self.failures:
+            lines.append(f"\n{len(self.failures)} jugadores fallaron y se saltaron:")
+            lines += [f"  - {failure}" for failure in self.failures]
+        return "\n".join(lines)
+
     def merge(self, other: IngestResult) -> IngestResult:
         """Une dos resultados (suma tablas distintas, concatena fallos)."""
         anomalies = dict(self.anomalies)
