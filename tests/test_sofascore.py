@@ -136,6 +136,46 @@ def test_ingest_by_name_writes_both_tables_and_reproduces_experiment(tmp_path):
     assert "expectedGoals" not in laliga2.dropna(axis=1, how="all").columns
 
 
+def test_ingest_by_name_with_several_football_candidates_lists_them_and_downloads_nothing(
+    tmp_path,
+):
+    # search-ambiguous.json trae dos homónimos de fútbol (Villarreal y Levante) y
+    # uno de baloncesto: no se elige a ciegas (#100), se listan los de fútbol y no
+    # se descarga nada.
+    storage = storage_at(tmp_path)
+    routes = default_routes()
+    routes["search/all"] = fixture("search-ambiguous.json")
+
+    with pytest.raises(ValueError) as excinfo:
+        ingest_player(
+            storage,
+            "Alex Fores",
+            mappings_dir=str(tmp_path / "mappings"),
+            transport=RoutingTransport(routes),
+        )
+
+    message = str(excinfo.value)
+    assert "1086128" in message
+    assert "2200001" in message
+    assert "1540636" not in message  # el homónimo de baloncesto no cuenta como candidato
+    with pytest.raises(FileNotFoundError):
+        storage.curated.read_table("player_season_stats")
+
+
+def test_ingest_by_name_without_football_candidates_raises(tmp_path):
+    storage = storage_at(tmp_path)
+    routes = default_routes()
+    routes["search/all"] = fixture("search-ambiguous.json")
+
+    with pytest.raises(ValueError, match="ningún jugador"):
+        ingest_player(
+            storage,
+            "Nombre Que No Aparece",
+            mappings_dir=str(tmp_path / "mappings"),
+            transport=RoutingTransport(routes),
+        )
+
+
 def test_ingest_populates_per_match_event_metrics(tmp_path):
     storage = storage_at(tmp_path)
     ingest_player(

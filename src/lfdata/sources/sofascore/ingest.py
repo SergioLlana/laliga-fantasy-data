@@ -553,7 +553,10 @@ def _resolve_player(
     - ``canonical_id`` (``p\\d+``): busca su id de SofaScore en los mappings
       aprobados; si no lo tiene, es un error (no hay a quién descargar).
     - numérico: se toma como id de SofaScore directo.
-    - texto: se busca por nombre y se toma el primer jugador del resultado.
+    - texto: se filtra la búsqueda a fútbol y a nombre compatible (misma norma
+      que ``resolve_identity_by_search``). Con un único candidato se baja por su
+      id; con varios no se elige a ciegas (#100, principio de #81): se lista cada
+      candidato para relanzar con el id de SofaScore concreto.
     """
     if _CANONICAL_RE.match(query):
         rows = store.players[
@@ -569,10 +572,23 @@ def _resolve_player(
     if query.isdigit():
         return int(query), None
 
-    players = client.search_players(query).players()
-    if not players:
+    football = [
+        player
+        for player in client.search_players(query).players()
+        if player.sport == FOOTBALL and name_compatible(query, player.name)
+    ]
+    if not football:
         raise ValueError(f"SofaScore no devolvió ningún jugador para {query!r}.")
-    return players[0].id, players[0].name
+    if len(football) > 1:
+        listado = "\n".join(
+            f"  {player.id}: {player.name} ({player.team.name if player.team else 'sin equipo'})"
+            for player in football
+        )
+        raise ValueError(
+            f"{query!r} tiene varios candidatos en SofaScore; "
+            f"relanza con el id concreto:\n{listado}"
+        )
+    return football[0].id, football[0].name
 
 
 def _event_stats(
