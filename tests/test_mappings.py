@@ -1330,6 +1330,73 @@ def test_check_passes_after_full_mapping(storage: Storage, tmp_path: Path) -> No
     assert check_mappings(storage, mappings) == []
 
 
+def test_check_fails_on_unmapped_history_player(storage: Storage, tmp_path: Path) -> None:
+    """Un jugador solo-histórico (dejó la competición) sin canónico rompe --check (#97)."""
+    seed(
+        storage,
+        teams=BASIC_TEAMS,
+        players=[{"id": 100, "name": "Williams", "team_id": 1}],
+        tm_players=BASIC_TM,
+    )
+    mappings = tmp_path / "mappings"
+    run_map(storage, mappings)  # la plantilla actual queda mapeada
+    # Morales solo vive en el histórico de una temporada pasada; nadie lo mapea.
+    seed_history(
+        storage,
+        season=DEFAULT_SEASON - 1,
+        team={"id": 3, "name": "Levante", "slug": "levante"},
+        player={"id": 900, "name": "Morales", "slug": "morales", "position": 4, "team_id": 3},
+    )
+    problems = check_mappings(storage, mappings)
+    assert any("Morales" in p for p in problems)
+
+
+def test_check_passes_on_mapped_history_player(storage: Storage, tmp_path: Path) -> None:
+    """El histórico mapeado en su propia pasada no rompe --check."""
+    past = DEFAULT_SEASON - 1
+    seed(
+        storage,
+        teams=[{"id": 1, "name": "Athletic"}],
+        players=[{"id": 1, "name": "Williams", "team_id": 1}],
+        tm_players=BASIC_TM[:1],
+        tm_past=[
+            {
+                "id": 55,
+                "name": "José Luis Morales",
+                "club_id": 3,
+                "club_name": "Levante UD",
+                "birth_date": "1987-07-23",
+                "position": "Left Winger",
+            },
+        ],  # fmt: skip
+    )
+    seed_history(
+        storage,
+        season=past,
+        team={"id": 3, "name": "Levante", "slug": "levante"},
+        player={"id": 900, "name": "Morales", "slug": "morales", "position": 4, "team_id": 3},
+    )
+    mappings = tmp_path / "mappings"
+    run_map(storage, mappings)  # mapea la plantilla actual (Williams)
+    run_map(storage, mappings, season=past)  # mapea el histórico de esa pasada (Morales)
+    assert check_mappings(storage, mappings) == []
+
+
+def test_check_history_only_reports_once_across_seasons(storage: Storage, tmp_path: Path) -> None:
+    """Un mismo id sin mapping en dos temporadas del histórico se reporta una sola vez."""
+    seed(storage, teams=BASIC_TEAMS, players=[], tm_players=[])
+    mappings = tmp_path / "mappings"
+    for season in (DEFAULT_SEASON - 1, DEFAULT_SEASON - 2):
+        seed_history(
+            storage,
+            season=season,
+            team={"id": 3, "name": "Levante", "slug": "levante"},
+            player={"id": 900, "name": "Morales", "slug": "morales", "position": 4, "team_id": 3},
+        )
+    problems = check_mappings(storage, mappings)
+    assert sum("900" in p for p in problems) == 1
+
+
 # --- CLI ---------------------------------------------------------------------
 
 

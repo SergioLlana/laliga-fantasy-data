@@ -111,9 +111,25 @@ contrasta la fecha de nacimiento del perfil con la de Biwenger antes de curar
    (como `manual`) y vuelve a proponer solo lo que siga sin resolver. Es
    idempotente: lo aprobado no se vuelve a tocar.
 4. `lfdata map --check` falla (CI y pipeline) si algún jugador o equipo de
-   Biwenger presente en las tablas curadas se quedó sin `canonical_id`, si algún
-   `sofascore_player_id` del eventing curado no tiene canónico aprobado, o si los
-   ficheros de aprobados violan la integridad (ver abajo).
+   Biwenger presente en las tablas curadas se quedó sin `canonical_id` —tanto en
+   la plantilla actual como en el **histórico** de quien ya dejó la liga
+   (`biwenger_players_history`/`biwenger_teams_history`, decisión del issue #97:
+   ver más abajo)—, si algún `sofascore_player_id` del eventing curado no tiene
+   canónico aprobado, o si los ficheros de aprobados violan la integridad (ver
+   abajo).
+
+## Histórico: quien ya dejó la liga (#97)
+
+`biwenger_players_history`/`biwenger_teams_history` (poblado por `ingest_rounds`,
+la única vía que nombra a quien se fue) **sí entra en `--check`**: es la misma
+identidad que la plantilla actual (ADR 0006, la identidad no tiene temporada), y
+su ausencia de `canonical_id` deja huérfano su historial de puntos por jornada
+(`fantasy_round_points`, #51) igual que un `sofascore_player_id` sin canónico deja
+huérfano el eventing. `--check` no necesita `--season`: lee el histórico completo
+(todas las particiones ya descargadas), consistente con que el club sea una pista
+y no un filtro. Cada id se reporta como máximo una vez aunque aparezca en varias
+temporadas, y con la etiqueta `(histórico)` para distinguirlo de un hueco en la
+plantilla actual.
 
 ## Decisiones que no se pueden aplicar
 
