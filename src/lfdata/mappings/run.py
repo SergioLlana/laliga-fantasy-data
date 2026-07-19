@@ -1198,11 +1198,14 @@ def check_mappings(storage: Storage, mappings_dir) -> list[str]:
     """Devuelve los problemas de cobertura; lista vacía = todo mapeado.
 
     Falla (para CI y pipeline) si algún jugador o equipo de Biwenger presente en
-    las tablas curadas no tiene un ID canónico aprobado, o si algún
-    ``sofascore_player_id`` presente en el eventing curado no tiene canónico: sin
-    ese cruce el eventing queda huérfano y no se puede unir a la identidad. Sin
-    datos curados (p. ej. en CI, donde ``data/`` está en .gitignore) no hay nada
-    que verificar y pasa.
+    las tablas curadas no tiene un ID canónico aprobado —tanto en la plantilla
+    **actual** (``biwenger_players``/``biwenger_teams``) como en el **histórico**
+    de quien ya dejó la competición (``biwenger_players_history``/
+    ``biwenger_teams_history``, poblado por ``ingest_rounds``: es la única vía
+    que nombra a quien se fue, issue #97) — o si algún ``sofascore_player_id``
+    presente en el eventing curado no tiene canónico: sin ese cruce el dato
+    queda huérfano y no se puede unir a la identidad. Sin datos curados (p. ej.
+    en CI, donde ``data/`` está en .gitignore) no hay nada que verificar y pasa.
     """
     biw_players = _read_curated(storage, "biwenger_players", ["id", "name", "competition"])
     biw_teams = _read_curated(storage, "biwenger_teams", ["id", "name", "competition"])
@@ -1213,8 +1216,33 @@ def check_mappings(storage: Storage, mappings_dir) -> list[str]:
     problems: list[str] = []
     problems += _missing(biw_teams, store.approved_ids(store.teams, BIWENGER), "equipo")
     problems += _missing(biw_players, store.approved_ids(store.players, BIWENGER), "jugador")
+    problems += _missing(
+        _history_only(storage, "biwenger_teams_history", biw_teams),
+        store.approved_ids(store.teams, BIWENGER),
+        "equipo (histórico)",
+    )
+    problems += _missing(
+        _history_only(storage, "biwenger_players_history", biw_players),
+        store.approved_ids(store.players, BIWENGER),
+        "jugador (histórico)",
+    )
     problems += _missing_sofascore(storage, store.approved_ids(store.players, SOFASCORE))
     return problems
+
+
+def _history_only(storage: Storage, table: str, current: pd.DataFrame) -> pd.DataFrame:
+    """Filas de una tabla ``*_history`` cuyo id no está ya en la plantilla actual.
+
+    ``ingest_rounds`` escribe una fila por temporada vista, así que un mismo id
+    puede repetirse entre particiones (varias temporadas): se queda con una sola
+    fila por id. A quien ya está en la plantilla actual lo cubre el ``_missing``
+    sobre ``current`` — no se duplica aquí.
+    """
+    history = _read_curated(storage, table, ["id", "name", "competition"])
+    if history.empty:
+        return history
+    history = history.drop_duplicates(subset="id")
+    return history[~history["id"].isin(set(current["id"]))]
 
 
 def _missing_sofascore(storage: Storage, approved: set[str]) -> list[str]:
