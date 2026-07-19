@@ -19,6 +19,7 @@ from lfdata.newcomers import (
     NO_HISTORY,
     NO_IDENTITY,
     TABLE,
+    TM_HISTORY,
     detect_newcomers,
     ingest_newcomers,
 )
@@ -412,6 +413,70 @@ def test_newcomer_without_team_mapping_is_deferred(storage: Storage, tmp_path: P
     assert list(storage.curated.read_table(TABLE)["history"]) == [NO_IDENTITY]
     assert result.stats[DEFERRED_IDENTITY] == 1
     assert result.rows[TABLE] == 1
+
+
+def test_dangling_tm_mapping_outside_kader_is_ingested_by_id(
+    storage: Storage, tmp_path: Path
+) -> None:
+    # Fichaje con identidad de Transfermarkt enlazada a mano (token de Fase 1) pero
+    # fuera del kader de su club (filial / lag de TM): su tm_id está colgante —sin
+    # historial en market_values_tm—. El hook cierra la ventana bajando su carrera
+    # por id, en simetría con la descarga de SofaScore por id ya verificado. Aquí el
+    # club aún no está mapeado, así que no se refresca ningún kader y el tm_id queda
+    # colgante; la fecha de nacimiento de Biwenger cuadra con la del perfil de TM.
+    storage.curated.write_table(
+        "biwenger_players",
+        pd.DataFrame(
+            [
+                {
+                    "id": BIWENGER_FORES,
+                    "name": "Álex Forés",
+                    "team_id": BIWENGER_TEAM,
+                    "birth_date": "2001-04-12",
+                }
+            ]
+        ),
+        partition={"competition": "la-liga"},
+    )
+    mappings = tmp_path / "mappings-filial"
+    mappings.mkdir()
+    pd.DataFrame(
+        [
+            {
+                "canonical_id": "p00001",
+                "fuente": fuente,
+                "id_en_fuente": source_id,
+                "metodo": "manual",
+                "fecha": "2026-07-01",
+            }
+            for fuente, source_id in (("biwenger", BIWENGER_FORES), ("transfermarkt", TM_FORES))
+        ]
+    ).to_csv(mappings / "players.csv", index=False)
+
+    transfermarkt = RoutingTransport(transfermarkt_routes())
+    result = run(storage, mappings, RoutingTransport(sofascore_routes()), transfermarkt)
+
+    # Su historial de Transfermarkt se curó por id, no vía kader de un club.
+    values = storage.curated.read_table("market_values_tm")
+    assert set(values["player_id"]) == {TM_FORES}
+    assert result.stats[TM_HISTORY] == 1
+    assert any("profil/spieler" in url for url in transfermarkt.urls)
+    assert not any("kader/verein" in url for url in transfermarkt.urls)
+
+
+def test_newcomer_in_kader_does_not_trigger_a_second_tm_download(
+    storage: Storage, mappings: Path
+) -> None:
+    # El fichaje que sí está en el kader de su club ya tiene historial —lo curó el
+    # refresh de identidad (ingest_clubs)—, así que la comprobación de colgante lo
+    # excluye y no se le pide dos veces a Transfermarkt.
+    approve_player(mappings)
+    transfermarkt = RoutingTransport(transfermarkt_routes())
+
+    result = run(storage, mappings, RoutingTransport(sofascore_routes()), transfermarkt)
+
+    assert TM_HISTORY not in result.stats
+    assert sum(1 for url in transfermarkt.urls if f"profil/spieler/{TM_FORES}" in url) == 1
 
 
 def test_second_run_downloads_nothing(storage: Storage, mappings: Path) -> None:
