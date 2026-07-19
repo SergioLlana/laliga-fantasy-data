@@ -332,8 +332,15 @@ def _resolve_identity(
     ``canonical_id``, ninguna tabla curada canónica lo admite). Refrescamos solo
     esos clubes —uno o dos en un día normal— y ejecutamos el matcher: cada fichaje
     sale aprobado o encolado a revisión, y el run sigue en ambos casos.
+
+    Un único ``MappingStore`` para toda la función (issue #98): se carga una vez,
+    ``run_map`` lo mapea y lo guarda en el mismo objeto (nada más reescribe
+    ``mappings/`` entre medias), así que no hace falta releerlo del disco después.
     """
-    club_ids = _transfermarkt_clubs(mappings_dir, {n.team_id for n in pending})
+    store = MappingStore(Path(mappings_dir))
+    store.load()
+
+    club_ids = _transfermarkt_clubs(store, {n.team_id for n in pending})
     if club_ids:
         _add(
             result,
@@ -347,7 +354,7 @@ def _resolve_identity(
             ),
         )
 
-    report = run_map(storage, mappings_dir, season=season)
+    report = run_map(storage, mappings_dir, season=season, store=store)
     logger.info(
         "newcomers %s %d: matcher tras el refresh — %d/%d jugadores mapeados, %d en revisión",
         competition,
@@ -356,9 +363,6 @@ def _resolve_identity(
         report.players_total,
         report.players_review,
     )
-
-    store = MappingStore(Path(mappings_dir))
-    store.load()
 
     _download_dangling_tm_history(
         storage,
@@ -434,7 +438,7 @@ def _tm_history_ids(storage: Storage) -> set[str]:
     return {str(int(v)) for v in df["player_id"].dropna()}
 
 
-def _transfermarkt_clubs(mappings_dir: str, team_ids: Iterable[int | None]) -> set[int]:
+def _transfermarkt_clubs(store: MappingStore, team_ids: Iterable[int | None]) -> set[int]:
     """IDs de club de Transfermarkt de los equipos de Biwenger dados.
 
     Un equipo aún sin mapping (un recién ascendido en su primera ronda, p. ej.) no
@@ -442,8 +446,6 @@ def _transfermarkt_clubs(mappings_dir: str, team_ids: Iterable[int | None]) -> s
     Transfermarkt hasta que se apruebe el mapping de su equipo, pero su historial
     de SofaScore se descarga igual y el run no se cae.
     """
-    store = MappingStore(Path(mappings_dir))
-    store.load()
     canonical_by_biwenger = MappingStore.canonical_by_source(store.teams, BIWENGER)
     tm_by_canonical = {
         canonical: tm_id
