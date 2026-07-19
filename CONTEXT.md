@@ -32,6 +32,10 @@ _Avoid_: liga anterior, liga externa (Segunda no es externa a Biwenger y aun as�
 La proyección inicial de un jugador recién llegado a La Liga, estimada a partir de su historial en otras ligas.
 _Avoid_: cold start (jerga)
 
+**Precio**:
+El valor de mercado diario de un jugador en la plataforma de fantasy: sube y baja según su demanda entre managers. Es una señal de la **plantilla entera**, independiente de si el jugador puntuó esa jornada, e insumo de las recomendaciones de mercado (mayores subidas/bajadas, infravalorados). Distinto del **Nivel de equipo** (valor de plantilla de Transfermarkt) y del valor de cláusula de Biwenger (otra escala, ligado a la **Alerta de cláusula**).
+_Avoid_: valor (ambiguo con el valor de Transfermarkt), coste
+
 **Alerta de cláusula**:
 Aviso a un usuario de que la cláusula de un jugador de su liga va a quedar liberada pronto. Requiere datos privados de liga (fase 2).
 

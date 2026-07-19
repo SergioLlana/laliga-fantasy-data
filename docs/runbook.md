@@ -18,7 +18,8 @@ Sin esto los comandos escriben en `./data` local, que está incompleto.
 
 La temporada actual es 2026 y no se backfillea: entra por el incremental. Solo se
 backfillea **La Liga**: Segunda y el resto de ligas de origen se cubren bajo demanda
-cuando llega un fichaje (ver la última sección). Las temporadas se cargan
+cuando llega un fichaje (ver las secciones finales); Segunda admite además un backfill
+**opcional** (última sección). Las temporadas se cargan
 **temporada a temporada**, porque `map --season N` necesita las plantillas de
 Biwenger y Transfermarkt de N ya curadas, y el matching de SofaScore necesita a su
 vez el eventing de N ya descargado (de sus alineaciones sale el catálogo de identidad).
@@ -176,8 +177,10 @@ uv run lfdata newcomers --competition la-liga --season 2027 --max-newcomers 20
 
 ## Fichajes de otras ligas (bajo demanda)
 
-Segunda y el resto de ligas de origen **no se backfillean**: el historial de un
-jugador de fuera de La Liga se descarga solo cuando llega. El mecanismo habitual es
+Segunda y el resto de ligas de origen **no se backfillean por defecto**: el historial
+de un jugador de fuera de La Liga se descarga solo cuando llega. (Segunda admite además
+un backfill **opcional** —ver la sección siguiente—, que no sustituye a este mecanismo:
+es evidencia adicional, no una vía de resolución de fichajes.) El mecanismo habitual es
 el detector de fichajes del bloque semanal (`newcomers`): detecta a quien está en la
 plantilla sin puntos en temporadas anteriores, refresca la plantilla de Transfermarkt
 de su club de llegada, lo mapea (o lo encola a `mappings/*-review.csv`) y baja su
@@ -191,3 +194,29 @@ resolvió) está la ingesta manual:
 uv run lfdata ingest sofascore --player "Alex Fores"   # nombre, id de SofaScore
 uv run lfdata ingest sofascore --player p00123         # o canonical_id ya mapeado
 ```
+
+## Backfill opcional de Segunda (evidencia de matching y nivel de liga)
+
+Segunda **no es obligatoria**: sus fichajes entran solos por `newcomers`, que los
+enlaza e ingiere por jugador. Pero curar sus plantillas de Transfermarkt temporada a
+temporada aporta dos cosas que el bajo demanda no da por adelantado: **evidencia de
+matching de futuros ascendidos** —el matcher los cuadra solos por fecha en cuanto están
+curados, antes de que asciendan— y **granularidad del nivel de liga** del baseline de
+fichajes ([docs/implementation/05](implementation/05-baseline-de-fichajes.md)). Es la
+Fase 3 (issue #93); hazlo cuando el baseline lo pida —no bloquea nada—.
+
+Es **solo** la ingesta de Transfermarkt: ni Biwenger, ni SofaScore, ni `map` (el
+matching de los ascendidos llega solo en las pasadas de `map` habituales, en cuanto sus
+plantillas están curadas). Para cada temporada `N`:
+
+```bash
+uv run lfdata ingest transfermarkt --competition segunda-division --season N --since-days 30
+#    --since-days N  no re-pide a la fuente al jugador bajado hace < N días,
+#                    pero lo cura igual desde raw/ (reanudar el backfill)
+```
+
+Coste: ~22 clubes × ~28 jugadores × 5 peticiones a 4 s ≈ 3.000–3.500 peticiones ≈
+~4 h/temporada, reanudable. La invariante de partición única
+([ADR 0013](adr/0013-historial-transfermarkt-carrera-completa-particion-por-procedencia.md))
+evita duplicar el historial de un jugador alcanzado también desde `la-liga` o
+`bajo-demanda`: al escribirlo en `segunda-division` se retira de las demás particiones.

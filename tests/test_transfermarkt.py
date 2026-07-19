@@ -431,6 +431,46 @@ def test_ingest_squads_writes_curated_tables(storage: Storage, tmp_path: Path) -
     )
 
 
+def test_segunda_backfill_curates_into_its_own_partition_without_duplicating_history(
+    storage: Storage, tmp_path: Path
+) -> None:
+    """El backfill opcional de Segunda (#93) cura en ``competition=segunda-division`` y
+    no duplica el historial de un jugador ya alcanzado desde La Liga: la invariante de
+    partición única lo retira de la-liga al reescribirlo en segunda-division (ADR 0013).
+    La pertenencia a plantilla (``transfermarkt_players``), en cambio, sí coexiste por
+    (competición, temporada): un jugador puede haber estado en ambas.
+    """
+    # Se alcanza a los jugadores primero desde La Liga (mismo kader-fixture).
+    ingest_squads(
+        storage, "la-liga", season=2025, transport=RoutingTransport(default_routes()), max_clubs=1
+    )
+    reached = set(
+        storage.curated.read_partition("market_values_tm", partition={"competition": "la-liga"})[
+            "player_id"
+        ]
+    )
+    assert reached
+
+    # Ahora el backfill de Segunda alcanza a esos mismos jugadores.
+    result = ingest_squads(
+        storage,
+        "segunda-division",
+        season=2025,
+        transport=RoutingTransport(default_routes()),
+        max_clubs=1,
+    )
+    assert result.rows["market_values_tm"] > 0
+
+    # El historial (carrera completa) vive en una sola partición: se movió a Segunda.
+    market = storage.curated.read_table("market_values_tm")
+    moved = market[market["player_id"].isin(reached)]
+    assert moved["competition"].unique().tolist() == ["segunda-division"]
+
+    # La pertenencia a plantilla sí queda en ambas particiones de competición.
+    players = storage.curated.read_table("transfermarkt_players")
+    assert set(players["competition"].astype(str).unique()) == {"la-liga", "segunda-division"}
+
+
 class FailAfterFirstClubTransport(RoutingTransport):
     """Como RoutingTransport, pero cae al pedir la plantilla del segundo club."""
 
