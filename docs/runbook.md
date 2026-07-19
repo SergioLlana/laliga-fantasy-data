@@ -151,12 +151,14 @@ uv run lfdata ingest biwenger --competition la-liga --season 2026
 ### Semanal
 
 ```bash
+uv run lfdata ingest transfermarkt --competition la-liga --season 2026 --since-days 7
+uv run lfdata curate sofascore-catalog     # refresca el catálogo con las alineaciones ya descargadas
 uv run lfdata newcomers --competition la-liga --season 2026
 #    --dry-run        solo lista los fichajes detectados, sin descargar
 #    --max-newcomers  tope de fichajes resueltos por run (útil con histórico a medias)
-uv run lfdata ingest transfermarkt --competition la-liga --season 2026 --since-days 7
-uv run lfdata curate sofascore-catalog     # por si newcomers trajo alineaciones nuevas
-uv run lfdata map --season 2026            # + revisar mappings/*-review.csv (Transfermarkt y SofaScore)
+#    newcomers ejecuta `map` internamente (identidad antes de descargar, #81); con
+#    Transfermarkt y el catálogo ya frescos, esta es la única pasada de mapping de
+#    la semana — revisa mappings/*-review.csv (Transfermarkt y SofaScore) al terminar
 uv run lfdata curate sofascore-canonical   # re-estampa el eventing con los mappings nuevos
 uv run lfdata ingest transfermarkt-values --season 2026   # refresca el valor de plantilla (nivel de equipo/liga)
 uv run lfdata map --check

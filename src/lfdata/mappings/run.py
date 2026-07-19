@@ -372,6 +372,7 @@ def run_map(
     *,
     season: int = DEFAULT_SEASON,
     today: str | None = None,
+    store: MappingStore | None = None,
 ) -> MapReport:
     """Regenera candidatos y aplica decisiones; devuelve el resumen.
 
@@ -382,6 +383,11 @@ def run_map(
     en todas las temporadas descargadas. Si solo se mirase la temporada pedida,
     quien ya no está en la plantilla actual —Biwenger conserva su ficha— no
     tendría contraparte posible, cuando sí la tiene en la temporada en que jugó.
+
+    ``store`` acepta un ``MappingStore`` ya cargado (issue #98): quien lo pase
+    evita releer ``mappings/`` del disco cuando ya tiene el estado en memoria
+    —``newcomers`` lo hace para no cargarlo tres veces en el mismo run—. Por
+    defecto se carga uno nuevo, como siempre.
     """
     today = today or _today()
     biw_players = _with_history(
@@ -426,8 +432,9 @@ def run_map(
     so_teams_season = so_teams_all[so_teams_all["season"].astype(str) == str(season)]
     so_players_season = so_players_all[so_players_all["season"].astype(str) == str(season)]
 
-    store = MappingStore(mappings_dir)
-    store.load()
+    if store is None:
+        store = MappingStore(mappings_dir)
+        store.load()
 
     unapplied = _map_teams(store, biw_teams, tm_season, today)
     unapplied += _map_players(store, biw_players, tm_season, tm_all, today)
